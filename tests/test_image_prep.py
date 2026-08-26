@@ -12,6 +12,7 @@ import pytest
 from PIL import Image
 
 from django_lookup.services.image_prep import (
+    EMBED_SIDE,
     MAX_SIDE,
     InvalidImage,
     digest,
@@ -93,8 +94,43 @@ def test_unusable_bytes_raise_invalid_image(data):
 
 def test_encode_round_trips_and_digest_is_stable():
     image = load_and_crop(images.encode(images.product_image(9)))
+    assert max(image.size) <= EMBED_SIDE, "this fixture must stay under the embed cap to round-trip"
     assert digest(encode(image)) == digest(encode(image))
     assert load_and_crop(encode(image)).size == image.size
+
+
+def test_encode_caps_the_embedding_payload_below_the_hashing_size():
+    """The backend resizes to EMBED_SIDE itself, and OpenAI-compatible hosts cap the input
+    string — a MAX_SIDE JPEG inlined as base64 blows past it and the image leg goes dark."""
+    image = load_and_crop(images.encode(images.product_image(2, size=(3000, 2000))))
+    assert max(image.size) == MAX_SIDE  # the hashing path keeps the big picture
+
+    assert max(load_and_crop(encode(image)).size) == EMBED_SIDE
+
+
+def test_encode_leaves_the_callers_image_untouched():
+    """`Image.thumbnail` resizes in place. Callers hash the image they passed in, so encode
+    shrinking it would move the pHash feature space without a single failing assertion."""
+    image = load_and_crop(images.encode(images.product_image(3, size=(3000, 2000))))
+    before = image.size
+    before_hash = perceptual_hash(image)
+
+    encode(image)
+
+    assert image.size == before
+    assert perceptual_hash(image) == before_hash
+
+
+def test_encode_ships_far_less_than_the_hashing_size():
+    """The payload travels as a base64 data URL, so bytes here are bytes on the wire for
+    every catalog photo. EMBED_SIDE pixels are all the backend keeps."""
+    from django_lookup.embedding import transport
+
+    image = load_and_crop(images.encode(images.product_image(4, size=(3000, 2000))))
+
+    at_embed_side = len(transport.data_url(encode(image)))
+    at_max_side = len(transport.data_url(images.encode(image, "JPEG", quality=90)))
+    assert at_embed_side * 3 < at_max_side
 
 
 def test_probe_bytes_are_a_usable_image():

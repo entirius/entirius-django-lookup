@@ -9,19 +9,26 @@ in the search results — mixed vectors do not raise, they just stop matching. E
 failed check; the boot handshake in `apps.py` reports the same dimension mismatch as a warning only.
 """
 
+import math
 from dataclasses import dataclass
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
+from PIL import Image
 
 from django_lookup.constants import EMBEDDING_DIM
 from django_lookup.embedding.base import PROVIDER_NONE, EmbeddingError
 from django_lookup.embedding.factory import current_model_id, dimension_mismatch, get_embedding_provider
 from django_lookup.models import Fingerprint
+from django_lookup.services import image_prep
 from django_lookup.settings import image_enabled
 from django_lookup.tasks import probe_embedding
 
 HNSW_INDEX = "lookup_fp_image_vec_hnsw_idx"
+# Black vs white through a vision tower lands far below this; a text route fed two data URLs
+# that differ only in their payload returns ~1.0. The gap is wide, so the gate is deliberately
+# loose — it exists to catch "not an image endpoint", not to grade embedding quality.
+_MAX_PROBE_COSINE = 0.99
 DEFAULT_WORKER_TIMEOUT_S = 60
 
 
@@ -40,7 +47,7 @@ class Command(BaseCommand):
         parser.add_argument("--worker-timeout", type=int, default=DEFAULT_WORKER_TIMEOUT_S)
 
     def handle(self, *args, **options) -> None:
-        checks = [_settings_check(), _column_check(), _index_check(), _provider_check()]
+        checks = [_settings_check(), _column_check(), _index_check(), _provider_check(), _discrimination_check()]
         if not options["skip_worker"]:
             checks.append(_worker_check(options["worker_timeout"]))
         for check in checks:
@@ -97,6 +104,47 @@ def _provider_check() -> Check:
     expected = current_model_id()
     ok = info.dim == EMBEDDING_DIM and info.model_id == expected
     return Check("provider", ok, f"answers model={info.model_id} dim={info.dim}, expected {expected}/{EMBEDDING_DIM}")
+
+
+def _discrimination_check() -> Check:
+    """Two unlike pictures must not come back as the same vector.
+
+    A handshake that only reads back `model_id` and `dim` cannot tell an image endpoint from a
+    text one. Point `LOOKUP_EMBEDDING["url"]` at an OpenAI-compatible *text* route and it answers
+    200 with the right model and the right width — it just embedded the `data:image/jpeg;base64,`
+    string instead of decoding it, and every catalog photo shares that prefix, so the whole
+    catalog collapses onto one vector. Nothing raises; recall simply goes to noise.
+    """
+    if not image_enabled():
+        return Check("discrimination", True, "skipped, the image layer is off")
+    try:
+        vectors = get_embedding_provider().embed_images([_black(), _white()])
+    except EmbeddingError as exc:
+        return Check("discrimination", False, f"could not embed the probe pair: {exc}")
+    left, right = vectors[0].vector, vectors[1].vector
+    similarity = _cosine(left, right)
+    if similarity > _MAX_PROBE_COSINE:
+        return Check(
+            "discrimination",
+            False,
+            f"a black and a white image embed at cosine {similarity:.4f} — the backend is not "
+            "reading the pictures (is the URL a text route rather than an image one?)",
+        )
+    return Check("discrimination", True, f"unlike images embed apart (cosine {similarity:.4f})")
+
+
+def _black() -> bytes:
+    return image_prep.encode(Image.new("RGB", (64, 64), (0, 0, 0)))
+
+
+def _white() -> bytes:
+    return image_prep.encode(Image.new("RGB", (64, 64), (255, 255, 255)))
+
+
+def _cosine(left: list[float], right: list[float]) -> float:
+    dot = sum(a * b for a, b in zip(left, right, strict=True))
+    norms = math.sqrt(sum(a * a for a in left)) * math.sqrt(sum(b * b for b in right))
+    return dot / norms if norms else 1.0
 
 
 def _worker_check(timeout: int) -> Check:
