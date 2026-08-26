@@ -1,0 +1,9 @@
+# ERD configuration for django-lookup — consumed by `make erd APP=django_lookup`.
+# Output: D2 source committed to docs/erd/, rendered PNGs deployed alongside entirius-docs.
+app_label: django_lookup
+groups:
+  - name: fingerprints
+    title: "Fingerprints & Dedup Decisions"
+    models:
+      - Fingerprint
+      - DedupDecision
