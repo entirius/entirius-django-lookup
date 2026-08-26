@@ -18,7 +18,13 @@ from PIL import Image, ImageOps
 
 # Formats the API accepts; anything else is a client error, not a server problem.
 ALLOWED_FORMATS = frozenset({"JPEG", "PNG", "WEBP"})
-MAX_SIDE = 1024  # embeddings resize to 384 px anyway; 1024 keeps the hashes stable and the payload small
+MAX_SIDE = 1024  # what the hashes see: big enough that pHash stays stable across re-encodes
+# What the embedding backend sees. SigLIP-384 resizes to 384 px itself, so every pixel above
+# that is decoded, base64'd, shipped and thrown away: a 1024 px catalog photo is ~176 KB
+# against ~33 KB here, for a bit-identical vector. It also keeps the request clear of the
+# per-string input caps hosted backends apply (Infinity's text route stops at 122880
+# characters, which a 1024 px data URL exceeds twice over).
+EMBED_SIDE = 384
 _JPEG_QUALITY = 90
 # Pixels at or above this luminance are background. Scanned catalog shots are rarely pure 255 white.
 _WHITE_THRESHOLD = 247
@@ -52,9 +58,16 @@ def hamming(left: int, right: int) -> int:
 
 
 def encode(image: Image.Image) -> bytes:
-    """Bytes handed to the embedding provider — the pre-cropped picture, never the original."""
+    """Bytes handed to the embedding provider — the pre-cropped picture, never the original.
+
+    Downscaled to `EMBED_SIDE` on a copy: callers hash the picture they passed in, and
+    `Image.thumbnail` resizes in place, so shrinking the argument would silently move the
+    caller's feature space.
+    """
     buffer = BytesIO()
-    image.save(buffer, format="JPEG", quality=_JPEG_QUALITY)
+    for_embedding = image.copy()
+    for_embedding.thumbnail((EMBED_SIDE, EMBED_SIDE), Image.Resampling.LANCZOS)
+    for_embedding.save(buffer, format="JPEG", quality=_JPEG_QUALITY)
     return buffer.getvalue()
 
 
