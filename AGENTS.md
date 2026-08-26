@@ -109,6 +109,10 @@ the defaults are what the published baseline was measured with.
 - **Pre-crop is the whole trick:** catalog shots sit on white, which dominates the DCT.
   `image_prep.load_and_crop` verifies, applies EXIF orientation, crops to the non-white bounding box
   and downscales to 1024 px. **Query and catalog images MUST take the same path.**
+- **`encode` hands back a 384 px copy** (`EMBED_SIDE`): SigLIP-384 resizes to that anyway, so larger
+  bytes are shipped and thrown away (~176 KB vs ~33 KB per photo, same vector), and a 1024 px data
+  URL blows past the per-string caps hosted backends apply. It downscales a **copy** — `Image.thumbnail`
+  is in-place and the caller hashes the object it passed in.
 - `phash` is an `imagehash` 64-bit value reinterpreted as a **signed** bigint (`_signed`) — compare with `image_prep.hamming`, never a raw XOR.
 - Providers implement `embed_images(list[bytes]) -> list[EmbeddingResult]` and `info() -> ProviderInfo`;
   `LOOKUP_EMBEDDING["provider"]` is `http` / `voyage` / `none` / a dotted path (`docs/operations.md`).
@@ -119,8 +123,13 @@ the defaults are what the published baseline was measured with.
 - **Degrade, never fail:** a dead backend leaves `image_vec` NULL (retried next run) and `/search/`
   answers with `warnings: ["image_layer_unavailable"]`; the pHash leg keeps working regardless.
 - `manage.py lookup_doctor` is the fail-closed handshake: settings, column dimension, HNSW index, a
-  live embed from **both** the web process and the worker, plus coverage counts. `LookupConfig.ready()`
-  logs the same dimension mismatch as a warning and never blocks the boot.
+  live embed from **both** the web process and the worker, a discrimination probe, plus coverage counts.
+  `LookupConfig.ready()` logs the same dimension mismatch as a warning and never blocks the boot.
+- **The `discrimination` check is what catches a text route.** It embeds a black and a white square and
+  fails above cosine 0.99. Reading back `model_id` and `dim` cannot distinguish an image endpoint from a
+  text one: the text route answers 200 with the right model and width, having embedded the
+  `data:image/jpeg;base64,` string rather than decoding it. Every photo shares that prefix, so the catalog
+  collapses onto a single vector — nothing raises, recall just becomes noise.
 
 ## Calibration
 

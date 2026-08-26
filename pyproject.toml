@@ -1,6 +1,6 @@
 [project]
 name = "entirius-django-lookup"
-version = "0.1.0"
+version = "0.1.1"
 description = "Product lookup & dedup for the Volkanos platform — fingerprints, normalizers, match/review/no_match decisions"
 authors = [{ name = "Entirius" }]
 maintainers = [

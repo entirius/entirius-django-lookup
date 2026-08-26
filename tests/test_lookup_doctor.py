@@ -19,6 +19,7 @@ from tests import fake_embedding
 pytestmark = pytest.mark.django_db
 
 HEALTHY = ["lookup_doctor", "--skip-worker"]
+_EMBEDDING_SETTINGS = {"model": "fake-model", "dim": EMBEDDING_DIM}
 
 
 def _run(*args) -> str:
@@ -79,3 +80,28 @@ def test_backfill_images_enqueues_every_fingerprint_in_batches(monkeypatch, pim_
 def test_backfill_images_refuses_an_unknown_kind(pim_provider):
     with pytest.raises(CommandError):
         _run("lookup_backfill", "--images", "--kind", "nope")
+
+
+class _CollapsingProvider(fake_embedding.FakeEmbeddingProvider):
+    """A text route wearing an image route's clothes: right model, right width, one vector.
+
+    This is what an OpenAI-compatible `/embeddings` endpoint does when handed a
+    `data:image/jpeg;base64,...` string — it embeds the string. Every catalog photo shares
+    that prefix, so they all land on the same point and recall silently dies.
+    """
+
+    def embed_images(self, images):
+        results = super().embed_images(images)
+        constant = results[0].vector
+        return [type(result)(constant, result.model_id, result.dim) for result in results]
+
+
+def test_a_backend_that_cannot_tell_two_pictures_apart_fails_the_doctor():
+    provider = f"{_CollapsingProvider.__module__}.{_CollapsingProvider.__qualname__}"
+    with override_settings(LOOKUP_EMBEDDING={**_EMBEDDING_SETTINGS, "provider": provider}):
+        with pytest.raises(CommandError, match="discrimination"):
+            _run(*HEALTHY)
+
+
+def test_a_real_provider_passes_the_discrimination_probe():
+    assert "unlike images embed apart" in _run(*HEALTHY)

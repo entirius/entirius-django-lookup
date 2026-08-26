@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.1
+
+- `image_prep.encode` downscales to `EMBED_SIDE` (384 px) before handing bytes to the embedding
+  backend. SigLIP-384 resizes to 384 px itself, so every pixel above that was decoded, base64'd,
+  shipped and discarded — ~176 KB against ~33 KB for a bit-identical vector. It also keeps the
+  request clear of the per-string input caps hosted backends apply. The downscale runs on a copy:
+  `Image.thumbnail` resizes in place, and the caller hashes the picture it passed in.
+- `lookup_doctor` gains a `discrimination` check — it embeds a black and a white square and fails
+  when they come back at cosine > 0.99. Reading back `model_id` and `dim` cannot tell an image
+  endpoint from a text one: a text route answers 200 with the right model and width, having
+  embedded the `data:image/jpeg;base64,` string instead of decoding it. Every photo shares that
+  prefix, so the catalog collapses onto one vector and recall goes to noise without an error.
+
 ## 0.1.0
 
 Initial release.
