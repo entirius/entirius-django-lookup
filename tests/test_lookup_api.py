@@ -61,7 +61,7 @@ def test_check_response_keeps_its_shape(admin_client, catalog):
     body = admin_client.post(check_url(), {"q": GTIN}, format="json").json()
     assert set(body) == {"decision", "query_parsed", "candidates", "warnings"}
     candidate = body["candidates"][0]
-    assert set(candidate) == {"kind", "ref", "similarity", "score", "decision", "reasons", "basic"}
+    assert set(candidate) == {"kind", "ref", "similarity", "match", "score", "decision", "reasons", "basic"}
     assert set(candidate["basic"]) == {"sku", "name", "brand", "ean", "main_image_url", "detail_url"}
     assert set(candidate["reasons"][0]) == {"code", "label", "score", "observed"}
 
@@ -69,9 +69,9 @@ def test_check_response_keeps_its_shape(admin_client, catalog):
 def test_search_answers_hits_without_a_verdict(admin_client, catalog):
     body = admin_client.post(search_url(), {"q": GTIN}, format="json").json()
     assert set(body) == {"query_parsed", "hits", "warnings"}
-    assert body["hits"][0]["similarity"] == 60
-    assert "decision" not in body["hits"][0]
-    assert "score" not in body["hits"][0]
+    assert set(body["hits"][0]) == {"kind", "ref", "similarity", "match", "reasons", "basic"}
+    assert body["hits"][0]["similarity"] == 100
+    assert body["hits"][0]["match"] == "exact"
 
 
 def test_scope_narrows_the_catalogs(admin_client, catalog):

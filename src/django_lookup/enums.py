@@ -2,6 +2,8 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+from enum import StrEnum
+
 from django.db import models
 
 
@@ -28,3 +30,15 @@ class DecisionSource(models.TextChoices):
     CREATE_HOOK = "create_hook", "PIM create hook"
     PROPOSAL = "proposal", "Enrichment proposal"
     LOOKUP_EVAL = "lookup_eval", "Calibration eval (lookup_eval)"
+
+
+class MatchKind(StrEnum):
+    """How a `/search/` hit relates to the query — API vocabulary, never a column.
+
+    `exact`: the same identifier (trusted GTIN, brand+MPN) or the same picture file (pHash near-exact).
+    `similar`: something agreed, short of that. `none`: a blocking neighbour nothing agreed on.
+    """
+
+    EXACT = "exact"
+    SIMILAR = "similar"
+    NONE = "none"

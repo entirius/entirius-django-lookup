@@ -13,6 +13,14 @@ L6 weight/dimensions · L7 colour/size/pack · L8 image (pHash distance + embedd
 
 L8 is evidence, never proof: two black t-shirts photograph alike, so a candidate whose only positive
 evidence is its picture is flagged `image_only` and can never reach `match` (research r01 §2/§3).
+
+The additive score answers "is this the same product?" — the dedup question `/check/` asks. `/search/`
+asks a different one, "how well does this hit match what I was given?", and answers it with
+`relevance`: each evidence group (identifier, text, image) is normalised to 0–100 on its own scale and
+the *query's modality* decides which one counts — a photo-only query is scored by the photo, a text-only
+query by identifier/name, a mixed query by a fixed blend. Adding the raw groups instead would let one
+scale dominate whatever the other said, which is exactly why hybrid search engines weight by query
+(Meilisearch `semanticRatio`, Weaviate/Typesense `alpha`) or fuse by rank (RRF) rather than summing.
 """
 
 from dataclasses import dataclass, field
@@ -20,7 +28,7 @@ from decimal import Decimal
 
 from rapidfuzz.fuzz import token_set_ratio
 
-from django_lookup.enums import DecisionAuto
+from django_lookup.enums import DecisionAuto, MatchKind
 from django_lookup.models import Fingerprint
 from django_lookup.services.image_prep import hamming
 from django_lookup.services.image_service import QueryImage
@@ -84,6 +92,25 @@ CAPPING_FLAGS = CONFLICT_FLAGS | {FLAG_IMAGE_ONLY}
 SCORE_MIN = 0
 SCORE_MAX = 100
 
+# --- relevance (what /search/ reports) ---
+RELEVANCE_MAX = 100
+# Identifier group: an exact trusted key is the whole answer; a partial one (MPN without a brand on one
+# side, a catalog sku) or an untrusted GTIN says "probably" on the same 0-100 scale.
+RELEVANCE_IDENTIFIER: dict[str, int] = {
+    "gtin_exact": 100,
+    "brand_mpn_exact": 100,
+    "mpn_exact": 80,
+    "sku_exact": 80,
+    "gtin_exact_untrusted": 60,
+}
+# Image group: the same file is the whole answer; the same shot reworked nearly so; otherwise the
+# embedding cosine mapped over [COSINE_SIMILAR, 1.0].
+RELEVANCE_PHASH_NEAR_EXACT = 100
+RELEVANCE_PHASH_NEAR = 85
+# Mixed query (text + picture): the share the picture gets. 0.5 is the alpha every hybrid engine
+# defaults to; an exact identifier short-circuits it to 100 regardless.
+FIND_IMAGE_WEIGHT = 0.5
+
 
 @dataclass(frozen=True)
 class Reason:
@@ -101,6 +128,10 @@ class PairScore:
     decision: str
     reasons: list[Reason]
     flags: frozenset[str]
+    # What /search/ reports: 0-100 relevance to the query as given (see module docstring), and the
+    # kind of match it is. Neither feeds the verdict.
+    relevance: int = 0
+    match: MatchKind = MatchKind.NONE
 
 
 def _observed(query_value: object, candidate_value: object) -> dict[str, str]:
@@ -266,8 +297,83 @@ def decide(score: int, flags: frozenset[str] | set[str]) -> str:
 
 
 def best_signal(reasons: list[Reason]) -> int:
-    """Similarity reported by /search/: the strongest single piece of evidence, 0 when none agrees."""
+    """The strongest single piece of positive evidence, 0 when none agrees (kept for callers that
+    want the dedup-scale view; /search/ reports `relevance` instead)."""
     return max((reason.score for reason in reasons if reason.score > 0), default=0)
+
+
+def _linear(value: float, floor: float, ceiling: float) -> int:
+    """0 at or below `floor`, RELEVANCE_MAX at or above `ceiling`, linear in between."""
+    if value <= floor:
+        return 0
+    return round(RELEVANCE_MAX * (min(value, ceiling) - floor) / (ceiling - floor))
+
+
+def _identifier_relevance(reasons: list[Reason]) -> int:
+    return max((RELEVANCE_IDENTIFIER.get(reason.code, 0) for reason in reasons), default=0)
+
+
+def _text_relevance(query: ParsedQuery, candidate: Fingerprint) -> int:
+    if not query.name_norm or not candidate.name_norm:
+        return 0
+    trigram = float(getattr(candidate, "name_similarity", 0.0) or 0.0)
+    tokens = token_set_ratio(query.name_norm, candidate.name_norm) / 100
+    return max(_linear(trigram, TRIGRAM_FLOOR, TRIGRAM_CEILING), _linear(tokens, TOKENS_WEAK, 1.0))
+
+
+def _phash_distance(candidate: Fingerprint, image: QueryImage | None) -> int | None:
+    if image is None or candidate.phash is None:
+        return None
+    return hamming(image.phash, candidate.phash)
+
+
+def _image_relevance(candidate: Fingerprint, image: QueryImage | None) -> int:
+    """The same file wins outright; otherwise the reworked-shot band, otherwise the cosine, mapped
+    over [COSINE_SIMILAR, 1.0] so the floor of any image evidence is 0 and identical is 100."""
+    if image is None:
+        return 0
+    distance = _phash_distance(candidate, image)
+    if distance is not None and distance <= PHASH_NEAR_EXACT:
+        return RELEVANCE_PHASH_NEAR_EXACT
+    cosine = 0.0
+    vector_distance = getattr(candidate, "image_distance", None)
+    if image.vector is not None and vector_distance is not None and candidate.vec_model == image.model_id:
+        cosine = 1.0 - float(vector_distance)
+    by_cosine = _linear(cosine, COSINE_SIMILAR, 1.0)
+    if distance is not None and distance <= PHASH_NEAR:
+        return max(RELEVANCE_PHASH_NEAR, by_cosine)
+    return by_cosine
+
+
+def _has_text(query: ParsedQuery) -> bool:
+    return any((query.gtin14, query.mpn_norm, query.sku, query.name_norm, query.brand_norm))
+
+
+def relevance(
+    query: ParsedQuery, candidate: Fingerprint, image: QueryImage | None, reasons: list[Reason]
+) -> tuple[int, MatchKind]:
+    """0-100 relevance of one candidate to the query *as given*, plus the kind of match.
+
+    The query's modality picks the scale: a picture alone is judged by the picture, text alone by the
+    best of identifier and name, both by `FIND_IMAGE_WEIGHT` — unless an exact identifier settles it.
+    Conflicts (brand, variant) do not lower it: they are dedup facts, and `/check/` says so.
+    """
+    identifier = _identifier_relevance(reasons)
+    text = _text_relevance(query, candidate)
+    picture = _image_relevance(candidate, image)
+    if image is None:
+        value = max(identifier, text)
+    elif not _has_text(query):
+        value = picture
+    elif identifier == RELEVANCE_MAX:
+        value = RELEVANCE_MAX
+    else:
+        value = round(FIND_IMAGE_WEIGHT * picture + (1 - FIND_IMAGE_WEIGHT) * max(identifier, text))
+    distance = _phash_distance(candidate, image)
+    same_file = distance is not None and distance <= PHASH_NEAR_EXACT
+    if identifier == RELEVANCE_MAX or same_file:
+        return value, MatchKind.EXACT
+    return value, MatchKind.SIMILAR if value > 0 else MatchKind.NONE
 
 
 def _phash_reasons(candidate: Fingerprint, image: QueryImage) -> list[Reason]:
@@ -336,4 +442,12 @@ def score_pair(query: ParsedQuery, candidate: Fingerprint, image: QueryImage | N
     reasons.extend(image_reasons)
     reasons.sort(key=lambda reason: -abs(reason.score))
     total = min(max(sum(reason.score for reason in reasons), SCORE_MIN), SCORE_MAX)
-    return PairScore(score=total, decision=decide(total, flags), reasons=reasons, flags=frozenset(flags))
+    found, match = relevance(query, candidate, image, reasons)
+    return PairScore(
+        score=total,
+        decision=decide(total, flags),
+        reasons=reasons,
+        flags=frozenset(flags),
+        relevance=found,
+        match=match,
+    )
