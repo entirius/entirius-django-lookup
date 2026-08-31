@@ -69,6 +69,9 @@ def test_a_photo_of_a_catalogued_product_finds_it(admin_client, catalog):
     assert body["warnings"] == []
     assert body["hits"][0]["ref"] == "SKU-1"
     assert {reason["code"] for reason in body["hits"][0]["reasons"]} >= {"image_near_exact"}
+    # A photo-only query is judged by the photo: the same file is the whole answer.
+    assert body["hits"][0]["similarity"] == 100
+    assert body["hits"][0]["match"] == "exact"
 
 
 def test_a_photo_alone_is_shown_but_never_decided(admin_client, catalog):
@@ -79,6 +82,9 @@ def test_a_photo_alone_is_shown_but_never_decided(admin_client, catalog):
     body = response.json()
     assert body["candidates"][0]["ref"] == "SKU-1"
     assert body["decision"] != DecisionAuto.MATCH
+    # ...even though, as a search hit, it is a 100 % exact picture match — two different questions.
+    assert body["candidates"][0]["similarity"] == 100
+    assert body["candidates"][0]["match"] == "exact"
 
 
 def test_multipart_carries_the_same_fields_as_json(admin_client, catalog):

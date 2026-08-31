@@ -6,7 +6,7 @@
 
 import pytest
 
-from django_lookup.enums import DecisionAuto, DecisionSource, FingerprintKind
+from django_lookup.enums import DecisionAuto, DecisionSource, FingerprintKind, MatchKind
 from django_lookup.models import DedupDecision, Fingerprint
 from django_lookup.providers.base import ProviderItem
 from django_lookup.schemas.requests.lookup import LookupQuery
@@ -39,7 +39,8 @@ def test_search_returns_the_hit_with_its_display_data(pim_provider):
     assert [hit.ref for hit in hits] == ["SKU-1"]
     assert hits[0].basic["name"] == "Wiertarka udarowa Bosch"
     assert hits[0].basic["detail_url"] == "/fake/SKU-1"
-    assert hits[0].similarity == 60
+    assert hits[0].similarity == 100  # relevance: a trusted GTIN is the whole answer
+    assert hits[0].match == MatchKind.EXACT
     assert hits[0].reasons[0].code == "gtin_exact"
 
 
@@ -99,6 +100,17 @@ def test_candidates_are_ranked_best_first(pim_provider):
     result = check(LookupQuery(q=f"Wiertarka udarowa {GTIN}"))
     assert [candidate.ref for candidate in result.candidates] == ["SKU-EAN", "SKU-NAME"]
     assert result.candidates[0].score > result.candidates[1].score
+
+
+def test_search_reports_relevance_to_the_query(pim_provider):
+    """A name-only query is judged by the name: the same name is 100, a partial overlap less — and a
+    name alone is never an `exact` match."""
+    add_product(pim_provider, "SKU-NAME", "Wiertarka udarowa niebieska")
+    add_product(pim_provider, "SKU-PARTIAL", "Wiertarka stolowa")
+    hits = search(LookupQuery(name="Wiertarka udarowa niebieska")).hits
+    assert hits[0].ref == "SKU-NAME"
+    assert (hits[0].similarity, hits[0].match) == (100, MatchKind.SIMILAR)
+    assert all(hit.similarity < 100 for hit in hits[1:])
 
 
 def test_limit_caps_the_answer(pim_provider):

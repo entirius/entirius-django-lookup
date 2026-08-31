@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
-from django_lookup.enums import DecisionAuto, FingerprintKind
+from django_lookup.enums import DecisionAuto, FingerprintKind, MatchKind
 
 
 class Observed(BaseModel):
@@ -61,7 +61,17 @@ class QueryParsed(BaseModel):
 class SearchHit(BaseModel):
     kind: FingerprintKind = Field(description="Catalog the hit comes from")
     ref: str = Field(description="Fingerprint reference inside that catalog")
-    similarity: int = Field(description="Strongest single piece of evidence, 0-100", examples=[60])
+    similarity: int = Field(
+        description=(
+            "Relevance to the query as given, 0-100: a photo-only query is judged by the photo, a text-only "
+            "query by identifier/name, both by a fixed blend. Not the dedup score."
+        ),
+        examples=[100],
+    )
+    match: MatchKind = Field(
+        description="`exact`: same identifier or the same picture file; `similar`: something agreed; `none`: nothing did",
+        examples=["exact"],
+    )
     reasons: list[ReasonOut] = Field(description="Evidence, strongest first")
     basic: BasicOut
 

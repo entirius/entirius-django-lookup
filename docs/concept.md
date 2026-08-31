@@ -131,9 +131,40 @@ score >= review_threshold or identifier_exact                                  -
 otherwise                                                                       -> no_match
 ```
 
-`best_signal(reasons)` — the strongest single piece of positive evidence — is what `/search/` reports
-as `similarity`; the clamped `sum(reason.score)` is `score`, reported (together with `decision`) only
-by `/check/`.
+The clamped `sum(reason.score)` is `score`, reported (together with `decision`) only by `/check/`.
+`/search/` reports something else — see the next section.
+
+## Relevance (find) vs score (dedup)
+
+The additive score answers *"is this the same product?"*. A `/search/` caller asks a different
+question — *"how well does this hit match what I gave you?"* — and a photo-only query shows why the
+two must not share a scale: the only evidence a picture can earn is L8 (≤ 10 points), so the identical
+photo would read as 10/100 on the dedup scale while being a perfect answer to the question asked.
+
+`scoring.relevance(query, candidate, image, reasons)` → `(0–100, MatchKind)`, carried as
+`PairScore.relevance` / `PairScore.match` and reported by `/search/` as `similarity` / `match`.
+Each evidence group is normalised to 0–100 on its own scale, and **the query's modality decides which
+one counts** — the same rule every hybrid search engine applies (Meilisearch `semanticRatio`,
+Weaviate / Typesense `alpha`; Elasticsearch fuses by rank for the same reason): heterogeneous scores
+are never summed, because the larger scale wins regardless of what the other said.
+
+| Group | 0–100 from |
+|---|---|
+| identifier | `gtin_exact` / `brand_mpn_exact` → 100 · `mpn_exact` / `sku_exact` → 80 · `gtin_exact_untrusted` → 60 (`RELEVANCE_IDENTIFIER`) |
+| text | max of trigram mapped linearly over `[TRIGRAM_FLOOR, TRIGRAM_CEILING]` and `token_set_ratio` over `[TOKENS_WEAK, 1.0]` |
+| image | pHash ≤ `PHASH_NEAR_EXACT` → 100 · ≤ `PHASH_NEAR` → 85 · else cosine mapped linearly over `[COSINE_SIMILAR, 1.0]` (0.99 → 95, 0.90 → 50); rows on the current `vec_model` only |
+
+| Query | `relevance` |
+|---|---|
+| picture only | image |
+| text only | max(identifier, text) |
+| both | 100 when identifier is 100, else `FIND_IMAGE_WEIGHT` · image + (1 − `FIND_IMAGE_WEIGHT`) · max(identifier, text), with `FIND_IMAGE_WEIGHT = 0.5` |
+
+`match` is `exact` when the identifier group is 100 or the picture is the same file (pHash ≤
+`PHASH_NEAR_EXACT`), `similar` when anything else agreed, `none` for a blocking neighbour nothing
+agreed on. Conflicts (brand, variant) never lower relevance — they are dedup facts, and `/check/`
+reports them through `decision`. `search` ranks by relevance (dedup score as tie-break); `check`
+ranks by score, as before.
 
 ## What `DedupDecision` records
 
@@ -154,3 +185,17 @@ returned, plus (separately) one row per human verdict on a proposed pair.
 `services/dedup_log.rejected_pairs(subject_refs)` reads back every rejected pair for a page of
 subjects in one query — the enrichment adapter's cooldown expires, but a human "no, these are not the
 same product" answer must not.
+
+## Normalisation rules (binding)
+
+`normalize/` is pure — no DB, no settings — and never raises; invalid input comes back as a value.
+
+- **GTIN**: digits only; length ∈ {8, 12, 13, 14}; GS1 check digit (`python-stdnum`); key = 14 digits
+  zero-padded. Indicator 1–8 → `related_unit` (a multipack, never equal). Prefixes 2 / 20–29 / 02 / 04
+  → `trusted=False`.
+- **MPN**: uppercase, drop ` -/.`; strip leading zeros only if ≥ 4 chars remain; `loose` = before the last `-`.
+- **Brand**: fold, drop legal forms, alias table (`hewlett packard` → `hp`).
+- **Name**: fold + unaccent, units (`1,5 l` → `1.5l`), stopwords pl/en/de, brand strip (given, or leading
+  tokens in the dictionary), pack (`2x`, `3-pack`, `zestaw 2`, `4 szt`), colour dictionary → english,
+  size (`xl`, `eu 42`).
+

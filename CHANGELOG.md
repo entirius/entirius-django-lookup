@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- `/search/` hits report **relevance to the query as given** instead of the strongest dedup reason:
+  `similarity` is now 0-100 on the scale the query's modality selects (a photo-only query is judged by
+  the photo — the same picture file is 100, cosine 0.99 → 95; text by identifier/name; both by a fixed
+  `FIND_IMAGE_WEIGHT` blend, an exact identifier short-circuiting to 100), and `match` says whether the
+  hit is `exact` (same identifier or same picture file), `similar` or `none`. `search` ranks by
+  relevance; `check`, its score, its verdict and the logged features are untouched. Before, a
+  photo-only query could never show more than 10/100 because image evidence weighs ≤ 10 on the dedup
+  scale — the two questions now have two scales (`docs/concept.md` § Relevance).
+  `django_pim`'s `PossibleDuplicateResponse` mirrors the new field (released alongside); a host on the
+  older PIM is unaffected at runtime — unknown keys are ignored.
+- Docs restructured by reader job: `docs/install.md` (prerequisites, the single settings table,
+  embedding backend choice, bootstrap order, sizing) is new; `AGENTS.md` is a map again, not a second
+  operations guide; `docs/gotchas.md` is the only gotcha list; `docs/operations.md` and `docs/api.md`
+  lost every fact that now has a home elsewhere. Normalisation rules moved to `docs/concept.md`.
+- `docs/settings_example.py` replaces the settings example in prose — `tests/test_docs_example.py`
+  asserts on it, so the documented block cannot drift (the previous example pointed at Infinity's
+  `/embeddings` text route, the silent catalog-collapse `lookup_doctor` now detects).
+
 ## 0.1.1
 
 - `image_prep.encode` downscales to `EMBED_SIDE` (384 px) before handing bytes to the embedding

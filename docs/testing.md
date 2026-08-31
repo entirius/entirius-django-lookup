@@ -1,9 +1,12 @@
-# Test suite map
+---
+title: Test suite map
+description: Which test file covers what.
+---
 
 - Suites: normalizer tables (`test_gtin`, `test_brand`, `test_mpn`, `test_name`), dictionary invariants
   (`test_dictionaries`: keys already folded, views immutable), registry with `tests/fake_provider.py`,
   `build_fingerprint`, model/index smoke, query parsing (`test_query_parser`), golden pairs + properties
-  (`test_scoring`), blocking recall (`test_blocking`: 1000 rows / 20 probes / recall@50), `search` and `check`
+  (`test_scoring`), relevance / match kind per query modality (`test_relevance`), blocking recall (`test_blocking`: 1000 rows / 20 probes / recall@50), `search` and `check`
   (`test_lookup_service`), the API contract incl. 400/401/403/429 (`test_lookup_api`) and the generated
   OpenAPI document (`test_openapi`). Image layer: `test_image_prep` (crop/EXIF/hash stability/format gate),
   `test_embedding` (factory, batching, dimension mismatch, backoff), `test_url_guard`, `test_image_service`
