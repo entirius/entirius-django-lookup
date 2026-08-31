@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - `/search/` hits report **relevance to the query as given** instead of the strongest dedup reason:
   `similarity` is now 0-100 on the scale the query's modality selects (a photo-only query is judged by
