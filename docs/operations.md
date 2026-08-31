@@ -1,246 +1,127 @@
 ---
 title: Operations
-description: Backfill, reconcile, doctor and eval commands; embedding providers; the SSRF guard; degradation.
+description: Day 2 — management commands, provider registration, Celery tasks, degradation, outbound fetches (SSRF), tuning the image search, re-measuring calibration.
 ---
+
+Install-time facts — prerequisites, the settings table, the embedding backend, bootstrap order,
+sizing — are in `install.md`. This file starts after the first `lookup_doctor` passed.
 
 ## Management commands
 
 | Command | Flags | What it does |
 |---|---|---|
-| `manage.py lookup_backfill` | `--kind`, `--since` (ISO timestamp), `--batch` (default 500), `--images` | Without `--images`: streams every configured provider's `iter_items(since)` in batches and upserts fingerprints (`services/backfill_service.backfill`). With `--images`: does not touch text columns at all — enqueues every existing fingerprint of the kind onto the `lookup` queue in batches of `IMAGE_TASK_BATCH` (32) so the worker fetches/hashes/embeds its picture. |
-| `manage.py lookup_reconcile` | `--kind`, `--batch` (default 500) | Repairs drift after lost signals: creates fingerprints for provider items that have none, deletes rows whose item is gone. Idempotent — safe to run on a schedule. Prints `created=N deleted=N` per kind. |
-| `manage.py lookup_doctor` | `--skip-worker`, `--worker-timeout` (default 60s) | Fail-closed health check of the image layer: settings, the `image_vec` column's actual halfvec dimension vs `EMBEDDING_DIM`, the HNSW index, a live embed from the web process **and** from the worker (`probe_embedding` task), plus coverage counts (total / hashed / embedded / on-another-model). Exits 1 on any failed check. |
-| `manage.py lookup_eval` | `--pairs <csv>` (required), `--thresholds` (default `45,75`), `--image-only`, `--log-decisions` | Calibration harness — see below. Exit code is always 0. `--log-decisions` leaves one `DedupDecision` row per candidate behind (`source=lookup_eval`); off by default, so a full pairs file does not flood the audit log. |
+| `manage.py lookup_backfill` | `--kind`, `--since` (ISO), `--batch` (500), `--images` | Without `--images`: streams every provider's `iter_items(since)` and upserts fingerprints (`backfill_service.backfill`). With `--images`: touches no text column — enqueues every fingerprint of the kind onto the `lookup` queue in batches of `IMAGE_TASK_BATCH` (32) for the worker to fetch, hash and embed. |
+| `manage.py lookup_reconcile` | `--kind`, `--batch` (500) | Repairs drift after lost signals: creates fingerprints for items that have none, deletes rows whose item is gone. Idempotent — schedule it. Prints `created=N deleted=N` per kind. |
+| `manage.py lookup_doctor` | `--skip-worker`, `--worker-timeout` (60 s) | Fail-closed health check of the image layer: settings, the `image_vec` column's real dimension vs `EMBEDDING_DIM`, the HNSW index, a live embed from the web process **and** from the worker, a discrimination probe (a black and a white square must embed apart), coverage counts. Exit 1 on any failure. |
+| `manage.py lookup_eval` | `--pairs <csv>`, `--thresholds` (`45,75`), `--image-only`, `--log-decisions` | Calibration harness — § Re-measuring. Exit code is always 0. |
 
-Both `lookup_backfill` and `lookup_reconcile` raise `CommandError` for an unknown `--kind` or an
-unregistered provider; every other row-level failure is per-item (a stale ref just does not appear).
+`lookup_backfill` and `lookup_reconcile` raise `CommandError` for an unknown `--kind` or an unregistered
+provider; every other failure is per item — a stale ref just does not appear.
 
 ## Provider registration
 
-`settings.LOOKUP_PROVIDERS: dict[str, str]` maps a `FingerprintKind` to a dotted module path
-implementing the provider protocol (`providers/base.py`): `iter_items(since=None)`, `get_item(ref)`
-(raises `LookupError` for an unknown ref), `basic(ref)`, `detail_url(ref)`, and optionally
-`signal_specs()` for freshness. `providers/registry.get_provider(kind)` imports lazily and caches by
-dotted path — a kind with no entry raises `ValueError` naming the known kinds.
+`LOOKUP_PROVIDERS` maps a `FingerprintKind` to a dotted module implementing `providers/base.py`:
+`iter_items(since=None)`, `get_item(ref)` (raises `LookupError`), `basic(ref)`, `detail_url(ref)`,
+optionally `signal_specs()` for freshness and `basics(refs)` / `detail_urls(refs)` for one-round-trip
+display data. `registry.get_provider(kind)` imports lazily and caches by path; an unknown kind raises
+`ValueError` naming the known ones.
 
-```python
-LOOKUP_PROVIDERS: dict[str, str] = {
-    "pim_product": "django_pim.services.lookup_provider",
-    "atlas_source_product": "django_atlas.services.lookup_provider",
-}
-```
+A host missing one catalog module simply has that kind stay unwired: `signals._specs()` logs a warning,
+`lookup_service._scope` drops the kind from the query and answers with `kind_unavailable:<kind>` in
+`warnings`.
 
-PIM and atlas never import each other, nor this module: they mirror `ProviderItem` / `BasicData`
-(field names are the contract) so an optional consumer never becomes a hard dependency of a catalog.
-A host that installs `django_lookup` without one of the catalog modules simply has that kind stay
-unwired — `signals._specs()` logs a warning and continues, `lookup_service._scope` drops the kind
-from a query and returns `kind_unavailable:<kind>` in `warnings` instead of failing the request.
+## Freshness and the Celery queue
 
-## Embedding providers
+Every task runs on queue **`lookup`** (`constants.CELERY_QUEUE`); the host worker must consume it.
 
-`settings.LOOKUP_EMBEDDING` selects the image-embedding backend; no model is ever loaded in a Django
-process — a provider is an HTTP client (or `none`). `LOOKUP_IMAGE_ENABLED` is the separate on/off
-switch for the whole image layer.
-
-| Setting | Default | Meaning |
-|---|---|---|
-| `LOOKUP_PROVIDERS` | `{}` | kind → dotted provider module path |
-| `LOOKUP_EMBEDDING` | `{"provider": "none"}` | `{provider, url, model, dim, api_key, timeout_s}` |
-| `LOOKUP_IMAGE_ENABLED` | `False` | Image layer on/off |
-| `LOOKUP_THRESHOLDS` | `{"match": 75, "review": 45}` | Decision thresholds on the 0–100 score |
-| `LOOKUP_EMBED_ALLOWED_HOSTS` | `[]` | Private hosts the embedding client and the catalog/worker image fetch may reach — never the request-supplied `image_url` path (see SSRF guard below) |
-| `LOOKUP_EMBED_CONCURRENCY` | `2` | Batches in flight per process — the embedding box is shared hardware |
-| `LOOKUP_HNSW_EF_SEARCH` | `60` | `hnsw.ef_search` for the image blocking query — higher = better recall, slower search |
-| `LOOKUP_BLOCK_PRIVATE_HOSTS` | `True` | SSRF guard master switch; `False` only in a dev harness whose fixtures/embed containers are private |
-
-`LOOKUP_EMBEDDING["provider"]`:
-
-| Provider | Class | Notes |
-|---|---|---|
-| `http` | `HttpEmbeddingProvider` | Self-hosted, OpenAI-compatible (Infinity / TEI) — the recommended default. `POST {url}` with `{"model", "input": ["data:image/jpeg;base64,..."]}`. No product photo ever leaves the network. |
-| `voyage` | `VoyageEmbeddingProvider` | Hosted (Voyage multimodal embeddings) — the "no GPU anywhere" option. Product photography leaves the network here; a deployment decision, not a default. Defaults to `https://api.voyageai.com/v1/multimodalembeddings` when `url` is unset. |
-| `none` | `NullEmbeddingProvider` | Image layer off. `embed_images` raises `ImageLayerDisabled`; pHash still works, it needs no backend. |
-| a dotted path | any `EmbeddingProvider` subclass | The same escape hatch `LOOKUP_PROVIDERS` gives the catalogs — how the test suite injects a fake, and how a bespoke backend can be wired without a code change here. |
-
-Example (zeno dev harness — self-hosted Infinity behind the `embed` compose service):
-
-```python
-LOOKUP_EMBEDDING = {
-    "provider": "http",
-    "url": "http://embed:7997/embeddings",
-    "model": "google/siglip-so400m-patch14-384",
-    "dim": 1152,
-    "timeout_s": 10,
-}
-LOOKUP_EMBED_ALLOWED_HOSTS = ["embed"]
-LOOKUP_IMAGE_ENABLED = True
-```
-
-`http` and `voyage` share `embedding/hosted.py`: batching (`MAX_BATCH = 64`), bounded parallelism
-(`ThreadPoolExecutor(max_workers=get_embed_concurrency())` above one batch), and dimension validation
-— a vector of the wrong length raises `EmbeddingError` immediately, so a silent model swap on the
-shared box breaks loudly instead of quietly returning vectors that stop matching.
-
-`EMBEDDING_DIM` (`constants.py`) is resolved **once at import** from `LOOKUP_EMBEDDING["dim"]`
-(default 1152 = SigLIP so400m) because it shapes the `halfvec(N)` column the migration created.
-Changing the configured dimension without a new migration + full re-embed makes
-`makemigrations --check` fail on purpose, and `lookup_doctor` reports the mismatch.
-
-## SSRF guard
-
-`security/url_guard.py` protects every outbound fetch the module makes: the embedding endpoint
-(`embedding/transport.py`) and remote catalog images (`services/image_service.fetch_remote`). It is
-a deliberate sibling of `django_atlas.security.url_guard` rather than a shared import — the lookup
-module must never depend on a catalog module.
-
-- `assert_safe_url(url, allowed_hosts=())` rejects non-`http`/`https` schemes, a missing hostname, and
-  (unless the host is in `allowed_hosts` or `LOOKUP_BLOCK_PRIVATE_HOSTS` is `False`) any hostname that
-  resolves to a private, loopback, link-local, reserved, multicast or unspecified IP.
-- `safe_get(url, timeout, cap, allowed_hosts=())` never auto-follows redirects
-  (`allow_redirects=False`) — each hop is re-validated by `assert_safe_url(hop, allowed_hosts)` before
-  it is fetched, up to `MAX_REDIRECTS = 3`, and the body is capped while streaming (`ValueError` past
-  the cap, never buffered unbounded). `allowed_hosts` travels with every hop, not just the first URL.
-- `embed_allowed_hosts()` (`LOOKUP_EMBED_ALLOWED_HOSTS`) punches a host-specific hole for a private
-  network — `fetch_remote` itself carries no allowlist opinion, its caller decides. The embedding
-  service (`embedding/transport.py`) and `image_service._load` (the catalog/worker path — a
-  provider-owned URL from `embed_refs`) pass it in. `lookup_service._query_image` (the API `image_url`
-  field — REQUEST-supplied, an admin-JWT caller's own input) passes none: punching the same hole there
-  would let any admin token use `image_url` as a blind SSRF oracle against the allowlisted hosts, past
-  the private-IP check. One setting, two different trust levels — never shared automatically.
-- `LOOKUP_BLOCK_PRIVATE_HOSTS = False` drops the IP check wholesale — a dev-harness switch only (zeno:
-  the `embed` and `fixtures` containers live on the compose network).
-
-Image size caps: `MAX_UPLOAD_IMAGE_BYTES` (5 MB, what a CMS client may POST — it downscales
-client-side first) and `MAX_REMOTE_IMAGE_BYTES` (10 MB, catalog images fetched by the worker or read
-from disk), `REMOTE_IMAGE_TIMEOUT_S = 10.0`.
-
-## Degradation, never failure
-
-The image layer is designed to fail soft everywhere:
-
-- A dead or unreachable embedding backend during `embed_refs`/`prepare_query` leaves `image_vec` NULL
-  (`phash` is still written) — the next backfill/refresh run retries, and the pHash blocking
-  leg keeps working regardless of the embedding backend's health.
-- `/search/` and `/check/` still answer when the embedding call fails; the response carries
-  `warnings: ["image_layer_unavailable"]` instead of a 5xx.
-- An upsert from a provider refresh **never touches** the image columns
-  (`phash`/`image_vec`/`vec_model`/`image_sha1`) — the image layer owns them exclusively, so a
-  text-only provider refresh cannot blank a picture that was already hashed/embedded.
-- A row embedded by a since-replaced model (`vec_model` mismatch) stays invisible to the HNSW blocking
-  leg — filtered out, never deleted — until `lookup_backfill --images` re-embeds it.
-
-`LookupConfig.ready()` logs a settings/column dimension mismatch as a **warning** — a service must
-still boot with a broken image layer, it just must not stay quiet about it.
-`manage.py lookup_doctor` is the fail-closed version of the same check: it exits non-zero.
-
-## Celery queue
-
-Every task in `tasks.py` runs on the `lookup` queue (`constants.CELERY_QUEUE`) — the host worker
-**must** consume it (`celery -A main worker -Q ...,lookup`), otherwise freshness signals pile up
-unprocessed and only `lookup_reconcile` keeps the table honest. The worker has no autoreload; restart
-it after any change to `tasks.py` or what it calls.
+`signals.connect()` (from `LookupConfig.ready()`) walks each provider's `signal_specs()` — dicts
+`{"model": "<app>.<Model>", "signal": "post_save" | "post_delete", "ref": callable}` — and enqueues
+`refresh_fingerprint` after commit.
 
 | Task | Trigger | Does |
 |---|---|---|
-| `refresh_fingerprint(kind, ref)` | Freshness signal, after commit | Rebuilds one row from its provider (or deletes it when the provider no longer serves the ref); re-embeds the picture in its own task when the row was rebuilt and the image layer is on |
-| `refresh_fingerprints(kind, refs)` | A bulk writer that bypasses signals (e.g. atlas full sync — `import_service._enqueue_lookup_refresh`) | Batched twin of `refresh_fingerprint`: a thin loop over the same single-ref logic, one publish per up to `constants.REFRESH_TASK_BATCH` (200) refs instead of one per row; batches the follow-on image task the same way |
-| `embed_fingerprint_images(kind, refs)` | `lookup_backfill --images`, chained from `refresh_fingerprint`/`refresh_fingerprints` | Hashes and embeds the main image of each ref, skipping a row whose `image_sha1` is unchanged and whose `vec_model` is current |
-| `probe_embedding()` | `lookup_doctor` (unless `--skip-worker`) | One real embedding call from *inside the worker* — proves worker-side reachability, which web-tier reachability does not |
+| `refresh_fingerprint(kind, ref)` | freshness signal, after commit | rebuilds one row from its provider, or deletes it when the provider no longer serves the ref; chains an image task when the row was rebuilt and the image layer is on |
+| `refresh_fingerprints(kind, refs)` | a bulk writer that bypasses signals (atlas full sync) | the batched twin — one publish per `REFRESH_TASK_BATCH` (200) refs, one image publish per batch |
+| `embed_fingerprint_images(kind, refs)` | `lookup_backfill --images`; chained from the refreshes | fetch → pre-crop → pHash → embed → `bulk_update`; skips a row whose `image_sha1` is unchanged *and* `vec_model` current |
+| `probe_embedding()` | `lookup_doctor` | one real embedding call from *inside the worker* — web-tier reachability proves nothing about it |
 
-Initial image backfill on a large catalog: drop `lookup_fp_image_vec_hnsw_idx`, bulk-load, recreate
-it — incremental HNSW inserts over roughly a million rows are far slower than one build.
+## Degradation, never failure
+
+- A dead embedding backend leaves `image_vec` NULL — `phash` is still written, the next run retries,
+  and the pHash leg keeps blocking regardless.
+- `/search/` and `/check/` still answer; the response carries `warnings: ["image_layer_unavailable"]`
+  instead of a 5xx.
+- A provider refresh never touches the image columns; a since-replaced model's rows are filtered from
+  the HNSW leg, never deleted, until re-embedded.
+- `LookupConfig.ready()` logs a settings/column dimension mismatch as a **warning** — a service boots
+  with a broken image layer, it just does not stay quiet. `lookup_doctor` is the fail-closed twin.
+
+## Outbound fetches (SSRF guard)
+
+`security/url_guard.py` — `http`/`https` only; a hostname resolving to a private, loopback, link-local,
+reserved, multicast or unspecified address is rejected unless allowlisted; redirects are never
+auto-followed (each hop re-validated, ≤ `MAX_REDIRECTS` 3); the body is capped while streaming. A
+deliberate sibling of atlas's guard, not a shared import — lookup never depends on a catalog module.
+
+| Fetch | URL comes from | Allowlist | Because |
+|---|---|---|---|
+| `embedding/transport.py` | the operator (`LOOKUP_EMBEDDING["url"]`) | `LOOKUP_EMBED_ALLOWED_HOSTS` | the embed host is private by design |
+| `image_service._load` (worker) | the catalog provider | `LOOKUP_EMBED_ALLOWED_HOSTS` | provider-owned URLs, same trust as the operator's |
+| `lookup_service._query_image` (API) | **the request** (`image_url`) | **none** | an admin JWT must not become a blind GET oracle against allowlisted internal hosts |
+
+Caps (`constants.py`): `MAX_UPLOAD_IMAGE_BYTES` 5 MB, `MAX_REMOTE_IMAGE_BYTES` 10 MB,
+`REMOTE_IMAGE_TIMEOUT_S` 10. `LOOKUP_BLOCK_PRIVATE_HOSTS = False` drops the IP check wholesale — a
+dev-harness switch only.
 
 ## Deepening the image search
 
-The image legs trade recall for latency, and the defaults are deliberately shallow — they are what the
-measured baseline was taken with. Three settings move that trade-off; nothing else about the layer changes:
+The defaults are deliberately shallow — they are what the published baseline was measured with.
+`similarity` / `match` on `/search/` are derived from the same evidence and move no baseline —
+the weights and the verdict path are untouched by them.
+Three settings move the recall/latency trade-off; nothing else about the layer changes.
 
-| Setting | Default | What it buys | What it costs |
+| Setting | Default | Buys | Costs |
 |---|---|---|---|
-| `LOOKUP_HNSW_EF_SEARCH` | `60` | how hard pgvector looks inside the HNSW graph before answering | CPU per query, roughly linear |
-| `LOOKUP_IMAGE_TOP_K` | `20` | neighbours each image leg hands to scoring | more rows scored, and one provider `basic()` per hit that survives |
-| `LOOKUP_PHASH_MAX_DISTANCE` | `10` | width of the free near-exact gate, in bits | above ~14 bits unrelated product shots start to slip in |
-
-Three profiles that work as a starting point:
+| `LOOKUP_HNSW_EF_SEARCH` | `60` | how hard pgvector searches the HNSW graph | CPU per query, roughly linear |
+| `LOOKUP_IMAGE_TOP_K` | `20` | neighbours each image leg hands to scoring | rows scored + one provider `basic()` per surviving hit |
+| `LOOKUP_PHASH_MAX_DISTANCE` | `10` | width of the free near-exact gate, bits | above ~14 unrelated product shots slip in |
 
 ```python
-# default — what the documented baseline was measured with
-LOOKUP_HNSW_EF_SEARCH = 60
-LOOKUP_IMAGE_TOP_K = 20
-LOOKUP_PHASH_MAX_DISTANCE = 10
-
-# thorough — an operator hunting a specific product, latency still interactive
-LOOKUP_HNSW_EF_SEARCH = 200
-LOOKUP_IMAGE_TOP_K = 40
-LOOKUP_PHASH_MAX_DISTANCE = 12
-
-# exhaustive — batch work (a catalog audit, a calibration run), not a UI path
-LOOKUP_HNSW_EF_SEARCH = 500
-LOOKUP_IMAGE_TOP_K = 100
-LOOKUP_PHASH_MAX_DISTANCE = 14
+# default    — the documented baseline          # thorough — operator hunting one product   # exhaustive — batch audits, not a UI path
+LOOKUP_HNSW_EF_SEARCH = 60                       LOOKUP_HNSW_EF_SEARCH = 200                  LOOKUP_HNSW_EF_SEARCH = 500
+LOOKUP_IMAGE_TOP_K = 20                          LOOKUP_IMAGE_TOP_K = 40                      LOOKUP_IMAGE_TOP_K = 100
+LOOKUP_PHASH_MAX_DISTANCE = 10                   LOOKUP_PHASH_MAX_DISTANCE = 12               LOOKUP_PHASH_MAX_DISTANCE = 14
 ```
 
-Rules that keep this honest:
-
-- **Deepening is not free recall.** `ef_search` only helps while the HNSW graph still holds unexplored
-  neighbours; past a point it costs latency and returns the same rows. Find that point by measurement.
-- **Re-measure after every change** — `make lookup-eval` in the harness prints the blocking-leg recall
-  and the decision view. A number in this file or in the harness `AGENTS.md` that was not produced by such
-  a run is not a baseline, it is a guess.
-- **The image leg is approximate by construction.** On the reference fixture its recall moves between runs
-  (0.28–0.34 measured across three seeds at the defaults), so a change smaller than that spread is noise.
-  Before comparing two embedding models, raise `ef_search` until repeated runs agree, or the model
-  difference will drown in HNSW's own variance.
-- **The gate recruits candidates; it does not score them.** `scoring.PHASH_NEAR` (10 bits) is a calibrated
-  constant and stays fixed: raising `LOOKUP_PHASH_MAX_DISTANCE` to 14 lets 11–14-bit neighbours reach scoring,
-  but they earn no pHash reason there and must win on the text evidence alone. That is deliberate — it widens
-  recall without silently moving the band the weights were calibrated on.
-- **Widening the pHash gate is the cheapest first step** and the easiest to overdo: it costs one sequential
-  scan over a bigint column, but every extra bit lets in visually similar, unrelated products — which then
-  need the text legs to disagree with them.
+- **Deepening is not free recall.** `ef_search` helps only while the graph still holds unexplored
+  neighbours; past that point it costs latency and returns the same rows. Find the point by measuring.
+- **The gate recruits, it does not score.** `scoring.PHASH_NEAR` (10 bits) stays fixed: a wider
+  `LOOKUP_PHASH_MAX_DISTANCE` lets 11–14-bit neighbours reach scoring, where they earn no pHash reason
+  and must win on text — recall widens without moving the band the weights were calibrated on.
+- **Widen the pHash gate first** — one sequential scan over a bigint column — and stop early: every extra
+  bit admits visually similar, unrelated products the text legs then have to reject.
+- **Re-measure after every change, on a fresh seed.** With real vectors the image leg is reproducible
+  (three fresh seeds, the same `recall@20`); a spread between runs is the embedding route collapsing
+  (`lookup_doctor`'s discrimination check), not HNSW noise.
 
 ## Re-measuring the calibration numbers
 
-`manage.py lookup_eval --pairs <csv>` runs the same `check()` the API uses over a hand-labelled CSV
-(`query_kind,query_ref,candidate_kind,candidate_ref,label,why`, `label ∈ {match, variant, no}`), with
-`limit` lifted to `blocking.CANDIDATE_LIMIT` (100) rather than the API's `MAX_LIMIT` (20) so the hit
-cap is never the dominant reason a true candidate is missing.
-
-Output, in order: `pairs: N (skipped S, not retrieved R)` and a skip-reason breakdown
-(`unknown kind` / `bad label` / `stale ref`); two threshold sweeps (`positives: match`, then
-`positives: match+variant` — a `variant` pair is a real, findable duplicate for blocking purposes but
-never one `/check/` should call `match`), each with precision/recall/F1/tp/fp/fn/tn per threshold; a
-confusion matrix (`label` vs the production `decide()` bucket); and two blocking-recall diagnostics
-that isolate one leg of `blocking.candidates()` each via `dataclasses.replace` on the `ParsedQuery` —
-`recall@50` blanks the exact-key fields and passes no image (the name-trigram leg alone),
-`recall@20` additionally blanks the name fields and passes only the query's own already-embedded
-image evidence (the pHash/HNSW legs alone, skipped rather than fabricated when that fingerprint has
-no pHash yet). `--image-only` skips the `check()`-driven sections and reports only `recall@20`. Every
-row runs `check(..., log=False)` by default — a full pairs file would otherwise leave one
-`DedupDecision` per candidate behind; pass `--log-decisions` to keep them (`source=lookup_eval`).
-
-The numbers are a measurement, not a gate — exit code is always 0, and a low number on the
-adversarial fixture (test-strategy §4) is data, not a bug. In zeno:
-
-```bash
-make seed         # fresh, labelled fixture — needed before every measurement
-make lookup-eval  # runs lookup_eval against the seeded pairs, embed container must be up
+```
+manage.py lookup_eval --pairs pairs.csv [--thresholds 45,75] [--image-only] [--log-decisions]
 ```
 
-A number only belongs in `AGENTS.md` / the harness `AGENTS.md` after being measured this way on a
-fresh seed — never derived or carried forward by assumption (`entirius-zeno/AGENTS.md` §Green
-baselines records the current measured run).
+CSV columns `query_kind,query_ref,candidate_kind,candidate_ref,label,why`, `label ∈ {match, variant, no}`
+— a `variant` is a real, findable duplicate for blocking but never a `/check/` `match`. Every row runs
+the production `check()` with `limit` lifted to `blocking.CANDIDATE_LIMIT` (100), so the API's hit cap is
+never why a true candidate is missing.
 
-### Calibration internals
+Output, in order: `pairs: N (skipped S, not retrieved R)` with a skip-reason breakdown; two threshold
+sweeps (`match`, then `match+variant`) with P/R/F1 per threshold; a confusion matrix against
+`decide()`; and two single-leg blocking-recall diagnostics — `recall@50` (name trigram alone) and
+`recall@20` (pHash/HNSW alone). How the legs are isolated without crediting one for another's hits:
+`services/eval_service.py` docstring.
 
-`eval_service._to_query` mirrors `fingerprint_service.pick_name` and carries `item.attrs`
-(weight / width / height / deep) into `Attrs`, so **L6/L7 score during calibration exactly as they
-do in production** — a divergence here would silently change the measured numbers without any
-production behaviour changing.
-
-The two blocking-recall diagnostics isolate one leg each via `dataclasses.replace` on the
-`ParsedQuery`, never a `pool[:K]` slice of the mixed union — a slice would credit an exact or
-trigram hit to "image blocking" and truncate real HNSW rows out of the measurement.
-
-Rows the run leaves behind are tagged `DecisionSource.LOOKUP_EVAL`, so an eval run's audit trail is
-distinguishable from production `/check/` traffic.
+Rows run with `log=False`; `--log-decisions` keeps one `DedupDecision` per candidate, tagged
+`source=lookup_eval`. **The numbers are a measurement, not a gate** — exit code is always 0, and a low
+number on the adversarial fixture is data. In zeno: `make seed` (fresh labelled fixture, every time),
+then `make lookup-eval` with the embed container up.

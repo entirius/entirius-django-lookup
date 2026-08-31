@@ -5,20 +5,22 @@
 """The two entry points behind the API: `search` (ranked hits) and `check` (hits + verdict).
 
 `search` answers "do we have something like this?" and stays free of verdicts — `Hit`, its return
-type, has no `score`/`decision` field at all, so a direct caller cannot read one. `check` is the thin
-dedup layer on top: the same pipeline (parse -> block -> score), run once, with `Candidate` (`Hit`
-plus the verdict) and an audit row per candidate.
+type, has no `score`/`decision` field at all, so a direct caller cannot read one. Its `similarity` is
+`PairScore.relevance`: 0-100 relevance to the query *as given* (a photo-only query is judged by the
+photo — `scoring.relevance`), ranked by it. `check` is the thin dedup layer on top: the same pipeline
+(parse -> block -> score), run once, with `Candidate` (`Hit` plus the verdict), ranked by the additive
+dedup score, and an audit row per candidate.
 """
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from types import ModuleType
 
 from django.contrib.auth.base_user import AbstractBaseUser
 
-from django_lookup.enums import DecisionAuto, DecisionSource
+from django_lookup.enums import DecisionAuto, DecisionSource, MatchKind
 from django_lookup.models import DedupDecision, Fingerprint
 from django_lookup.providers.base import BasicData
 from django_lookup.providers.registry import get_provider
@@ -26,7 +28,7 @@ from django_lookup.schemas.requests.lookup import LookupQuery
 from django_lookup.services import blocking, image_service, query_parser
 from django_lookup.services.image_service import QueryImage
 from django_lookup.services.query_parser import ParsedQuery
-from django_lookup.services.scoring import PairScore, Reason, best_signal, score_pair
+from django_lookup.services.scoring import PairScore, Reason, score_pair
 from django_lookup.settings import get_providers as configured_providers
 from django_lookup.settings import image_enabled
 
@@ -45,6 +47,7 @@ class Hit:
     kind: str
     ref: str
     similarity: int
+    match: MatchKind
     reasons: list[Reason] = field(default_factory=list)
     basic: dict[str, str] = field(default_factory=dict)
 
@@ -56,6 +59,7 @@ class Candidate:
     kind: str
     ref: str
     similarity: int
+    match: MatchKind
     score: int
     decision: str
     reasons: list[Reason] = field(default_factory=list)
@@ -170,7 +174,14 @@ def _scored_with_display(
 
 def _hits(scored: list[tuple[Fingerprint, PairScore]]) -> list[Hit]:
     return [
-        Hit(kind=row.kind, ref=row.ref, similarity=best_signal(pair.reasons), reasons=pair.reasons, basic=basic)
+        Hit(
+            kind=row.kind,
+            ref=row.ref,
+            similarity=pair.relevance,
+            match=pair.match,
+            reasons=pair.reasons,
+            basic=basic,
+        )
         for row, pair, basic in _scored_with_display(scored)
     ]
 
@@ -180,7 +191,8 @@ def _candidates(scored: list[tuple[Fingerprint, PairScore]]) -> list[Candidate]:
         Candidate(
             kind=row.kind,
             ref=row.ref,
-            similarity=best_signal(pair.reasons),
+            similarity=pair.relevance,
+            match=pair.match,
             score=pair.score,
             decision=pair.decision,
             reasons=pair.reasons,
@@ -190,16 +202,30 @@ def _candidates(scored: list[tuple[Fingerprint, PairScore]]) -> list[Candidate]:
     ]
 
 
+_Scored = tuple[Fingerprint, PairScore]
+_RankKey = Callable[[_Scored], tuple]
+
+
+def _by_relevance(pair: _Scored) -> tuple:
+    """`search`: what matches the query best, dedup score and name similarity as tie-breaks."""
+    return pair[1].relevance, pair[1].score, float(pair[0].name_similarity or 0.0)
+
+
+def _by_score(pair: _Scored) -> tuple:
+    """`check`: the additive dedup score, as before."""
+    return pair[1].score, float(pair[0].name_similarity or 0.0)
+
+
 def _pipeline(
-    query: LookupQuery, image_data: bytes | None
-) -> tuple[ParsedQuery, list[tuple[Fingerprint, PairScore]], list[str]]:
-    """Parse, block and score — the one pass shared by `search` and `check`."""
+    query: LookupQuery, image_data: bytes | None, rank: _RankKey
+) -> tuple[ParsedQuery, list[_Scored], list[str]]:
+    """Parse, block and score — the one pass shared by `search` and `check`; `rank` orders the cut."""
     parsed = query_parser.parse(query)
     scope, warnings = _scope(query)
     image, image_warnings = _query_image(query, image_data)
     rows = blocking.candidates(parsed, scope, image=image) if scope else []
     scored = [(row, score_pair(parsed, row, image)) for row in rows]
-    scored.sort(key=lambda pair: (pair[1].score, float(pair[0].name_similarity or 0.0)), reverse=True)
+    scored.sort(key=rank, reverse=True)
     return parsed, scored[: query.limit], warnings + image_warnings
 
 
@@ -208,7 +234,7 @@ def search(query: LookupQuery, image_data: bytes | None = None) -> SearchResult:
 
     `image_data` are the raw bytes of an uploaded picture; they are hashed, embedded and dropped.
     """
-    parsed, scored, warnings = _pipeline(query, image_data)
+    parsed, scored, warnings = _pipeline(query, image_data, _by_relevance)
     return SearchResult(parsed=parsed, hits=_hits(scored), warnings=warnings)
 
 
@@ -250,7 +276,7 @@ def check(
     proposal). `log=False` skips the audit write entirely — the calibration harness runs `check()`
     thousands of times per pairs file and does not want a `DedupDecision` row for every one of them.
     """
-    parsed, scored, warnings = _pipeline(query, image_data)
+    parsed, scored, warnings = _pipeline(query, image_data, _by_score)
     candidates = _candidates(scored)
     decision = max(
         (candidate.decision for candidate in candidates),
