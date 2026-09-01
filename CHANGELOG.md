@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 - The embedding can veto the pHash same-file shortcut in `/search/` relevance: pHash <=
   `PHASH_NEAR_EXACT` with a cosine below `SAME_FILE_COSINE` (0.95) is a DCT collision (flat
