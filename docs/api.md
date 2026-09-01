@@ -82,7 +82,7 @@ gains `score` (clamped total, negative reasons included) and its own `decision`.
 | `query_parsed` | what the parser understood — the exact keys blocking and scoring used. First place to look when a lookup returns nothing |
 | `hits` / `candidates` | `hits` ranked by `similarity`, `candidates` by `score` |
 | `similarity` | 0–100 relevance **to the query as given** — a photo-only query is judged by the photo, text by identifier/name, both by a fixed blend (`concept.md` § Relevance). Not the dedup score |
-| `match` | `exact` (same identifier or the same picture file) · `similar` · `none` (a blocking neighbour nothing agreed on — shown so the top neighbour is always visible) |
+| `match` | `exact` (same identifier, or the same picture file — pHash near-exact the embedding does not contradict, `concept.md` § Relevance) · `similar` · `none` (a blocking neighbour nothing agreed on — shown so the top neighbour is always visible) |
 | `score`, `decision` | check only: the clamped dedup sum and the verdict |
 | `reasons` | every level that fired, strongest first, each with `observed` (both sides) — judgeable without re-running |
 | `basic` | display data only (`sku`, `name`, `brand`, `ean`, `main_image_url`, `detail_url`), never a full product. One round trip when the provider defines `basics` / `detail_urls`, else one call per hit. A ref the provider no longer serves is dropped silently |

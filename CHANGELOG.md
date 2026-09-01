@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.1
+
+- The embedding can veto the pHash same-file shortcut in `/search/` relevance: pHash <=
+  `PHASH_NEAR_EXACT` with a cosine below `SAME_FILE_COSINE` (0.95) is a DCT collision (flat
+  packshots on white collide easily), not the same picture — the hit drops to the reworked-shot
+  band (85, `similar`) instead of 100/`exact`. Without a comparable vector the pHash stands alone,
+  as before. `/check/`, its score and verdict are untouched.
+- `docs/embedding.md` — the embedding backend's own page: enabling it, running the reference
+  Infinity container, the wire contract any OpenAI-compatible alternative must satisfy, bringing
+  your own `EmbeddingProvider`, and changing the model later. `install.md` keeps only the
+  install-time choice table.
+
 ## 0.2.0
 
 - `/search/` hits report **relevance to the query as given** instead of the strongest dedup reason:

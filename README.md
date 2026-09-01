@@ -18,6 +18,7 @@ the block to copy — it is under test.
 | Read | When |
 |---|---|
 | [`docs/install.md`](docs/install.md) | putting it on a host |
+| [`docs/embedding.md`](docs/embedding.md) | the image-embedding backend: running it, alternatives, your own provider |
 | [`docs/api.md`](docs/api.md) | calling `/search/` and `/check/` |
 | [`docs/operations.md`](docs/operations.md) | day 2 — commands, Celery, degradation, tuning, calibration |
 | [`docs/concept.md`](docs/concept.md) | why a weight, flag or threshold is what it is |

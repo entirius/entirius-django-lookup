@@ -68,6 +68,7 @@ Flow: provider `iter_items()` → `build_fingerprint` → `Fingerprint` → `blo
 | How the image pipeline works | the docstrings: `services/image_prep.py`, `services/image_service.py`, `tasks.py` |
 | Is the image layer healthy | `manage.py lookup_doctor` — the exit code is the answer |
 | Calibration numbers and how the legs are isolated | `manage.py lookup_eval`; `services/eval_service.py` docstring |
+| Running, replacing or extending the embedding backend | `docs/embedding.md`; `embedding/base.py` is the contract |
 | Freshness, tasks, degradation, tuning | `docs/operations.md` |
 | Which test file covers what | `docs/testing.md` |
 | What changed and why | `CHANGELOG.md` |
