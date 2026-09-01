@@ -107,6 +107,11 @@ RELEVANCE_IDENTIFIER: dict[str, int] = {
 # embedding cosine mapped over [COSINE_SIMILAR, 1.0].
 RELEVANCE_PHASH_NEAR_EXACT = 100
 RELEVANCE_PHASH_NEAR = 85
+# The vector can veto the pHash shortcut: the same file re-saved, resized or recompressed embeds at
+# ~0.98-1.0, so a pHash <= PHASH_NEAR_EXACT paired with a cosine below this is a contradiction — a
+# DCT collision (flat packshots on white collide easily), not the same picture. Without a comparable
+# vector the pHash still stands alone.
+SAME_FILE_COSINE = 0.95
 # Mixed query (text + picture): the share the picture gets. 0.5 is the alpha every hybrid engine
 # defaults to; an exact identifier short-circuits it to 100 regardless.
 FIND_IMAGE_WEIGHT = 0.5
@@ -327,19 +332,36 @@ def _phash_distance(candidate: Fingerprint, image: QueryImage | None) -> int | N
     return hamming(image.phash, candidate.phash)
 
 
+def _cosine(candidate: Fingerprint, image: QueryImage) -> float | None:
+    """Embedding cosine, or None when the pair has no comparable vectors."""
+    vector_distance = getattr(candidate, "image_distance", None)
+    if image.vector is None or vector_distance is None or candidate.vec_model != image.model_id:
+        return None
+    return 1.0 - float(vector_distance)
+
+
+def _same_file(candidate: Fingerprint, image: QueryImage | None) -> bool:
+    """pHash says near-exact AND the vector does not contradict it (see SAME_FILE_COSINE)."""
+    if image is None:
+        return False
+    distance = _phash_distance(candidate, image)
+    if distance is None or distance > PHASH_NEAR_EXACT:
+        return False
+    cosine = _cosine(candidate, image)
+    return cosine is None or cosine >= SAME_FILE_COSINE
+
+
 def _image_relevance(candidate: Fingerprint, image: QueryImage | None) -> int:
-    """The same file wins outright; otherwise the reworked-shot band, otherwise the cosine, mapped
-    over [COSINE_SIMILAR, 1.0] so the floor of any image evidence is 0 and identical is 100."""
+    """The same file (pHash, unless the vector vetoes it) wins outright; otherwise the reworked-shot
+    band, otherwise the cosine, mapped over [COSINE_SIMILAR, 1.0] so the floor of any image evidence
+    is 0 and identical is 100. A vetoed pHash near-exact falls into the reworked-shot band."""
     if image is None:
         return 0
-    distance = _phash_distance(candidate, image)
-    if distance is not None and distance <= PHASH_NEAR_EXACT:
+    if _same_file(candidate, image):
         return RELEVANCE_PHASH_NEAR_EXACT
-    cosine = 0.0
-    vector_distance = getattr(candidate, "image_distance", None)
-    if image.vector is not None and vector_distance is not None and candidate.vec_model == image.model_id:
-        cosine = 1.0 - float(vector_distance)
+    cosine = _cosine(candidate, image) or 0.0
     by_cosine = _linear(cosine, COSINE_SIMILAR, 1.0)
+    distance = _phash_distance(candidate, image)
     if distance is not None and distance <= PHASH_NEAR:
         return max(RELEVANCE_PHASH_NEAR, by_cosine)
     return by_cosine
@@ -369,9 +391,7 @@ def relevance(
         value = RELEVANCE_MAX
     else:
         value = round(FIND_IMAGE_WEIGHT * picture + (1 - FIND_IMAGE_WEIGHT) * max(identifier, text))
-    distance = _phash_distance(candidate, image)
-    same_file = distance is not None and distance <= PHASH_NEAR_EXACT
-    if identifier == RELEVANCE_MAX or same_file:
+    if identifier == RELEVANCE_MAX or _same_file(candidate, image):
         return value, MatchKind.EXACT
     return value, MatchKind.SIMILAR if value > 0 else MatchKind.NONE
 

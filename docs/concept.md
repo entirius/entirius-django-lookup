@@ -152,7 +152,7 @@ are never summed, because the larger scale wins regardless of what the other sai
 |---|---|
 | identifier | `gtin_exact` / `brand_mpn_exact` → 100 · `mpn_exact` / `sku_exact` → 80 · `gtin_exact_untrusted` → 60 (`RELEVANCE_IDENTIFIER`) |
 | text | max of trigram mapped linearly over `[TRIGRAM_FLOOR, TRIGRAM_CEILING]` and `token_set_ratio` over `[TOKENS_WEAK, 1.0]` |
-| image | pHash ≤ `PHASH_NEAR_EXACT` → 100 · ≤ `PHASH_NEAR` → 85 · else cosine mapped linearly over `[COSINE_SIMILAR, 1.0]` (0.99 → 95, 0.90 → 50); rows on the current `vec_model` only |
+| image | pHash ≤ `PHASH_NEAR_EXACT` *and the cosine does not contradict it* (≥ `SAME_FILE_COSINE` 0.95, or no comparable vector) → 100 · ≤ `PHASH_NEAR` (a vetoed near-exact included) → 85 · else cosine mapped linearly over `[COSINE_SIMILAR, 1.0]` (0.99 → 95, 0.90 → 50); rows on the current `vec_model` only |
 
 | Query | `relevance` |
 |---|---|
@@ -161,7 +161,8 @@ are never summed, because the larger scale wins regardless of what the other sai
 | both | 100 when identifier is 100, else `FIND_IMAGE_WEIGHT` · image + (1 − `FIND_IMAGE_WEIGHT`) · max(identifier, text), with `FIND_IMAGE_WEIGHT = 0.5` |
 
 `match` is `exact` when the identifier group is 100 or the picture is the same file (pHash ≤
-`PHASH_NEAR_EXACT`), `similar` when anything else agreed, `none` for a blocking neighbour nothing
+`PHASH_NEAR_EXACT`, unvetoed — the same file re-saved or resized embeds at ~0.98-1.0, so a cosine
+below `SAME_FILE_COSINE` marks the hash a DCT collision), `similar` when anything else agreed, `none` for a blocking neighbour nothing
 agreed on. Conflicts (brand, variant) never lower relevance — they are dedup facts, and `/check/`
 reports them through `decision`. `search` ranks by relevance (dedup score as tie-break); `check`
 ranks by score, as before.

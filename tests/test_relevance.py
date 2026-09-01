@@ -51,6 +51,19 @@ def test_the_same_file_is_the_whole_answer():
     assert pair.decision == DecisionAuto.NO_MATCH
 
 
+def test_a_contradicted_phash_near_exact_is_not_the_same_file():
+    """pHash 0 + cosine 0.90 is a contradiction: the same file embeds at ~0.98-1.0, so the hash is
+    a DCT collision (flat packshots collide easily) — the reworked-shot band, never 100/exact."""
+    pair = score_pair(ParsedQuery(), _candidate(cosine=0.90, phash=_distant(0)), _image())
+    assert (pair.relevance, pair.match) == (85, MatchKind.SIMILAR)
+
+
+@pytest.mark.parametrize(("cosine", "expected_match"), [(0.99, MatchKind.EXACT), (0.95, MatchKind.EXACT)])
+def test_a_cosine_confirmed_phash_near_exact_stays_the_whole_answer(cosine, expected_match):
+    pair = score_pair(ParsedQuery(), _candidate(cosine=cosine, phash=_distant(2)), _image())
+    assert (pair.relevance, pair.match) == (100, expected_match)
+
+
 @pytest.mark.parametrize(("cosine", "expected"), [(0.99, 95), (0.95, 75), (0.90, 50), (0.85, 25), (0.80, 0)])
 def test_the_cosine_maps_linearly_over_the_similar_band(cosine, expected):
     pair = score_pair(ParsedQuery(), _candidate(phash=_distant(20), cosine=cosine), _image())
