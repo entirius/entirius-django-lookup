@@ -53,29 +53,12 @@ value later means a new migration and a full re-embed — `makemigrations --chec
 | `none` | text / GTIN / pHash only — no warnings, nothing to operate | — |
 | dotted path | a bespoke `EmbeddingProvider` subclass | your call |
 
-Any OpenAI-compatible image-embedding endpoint works for `http`. The reference is
-[Infinity](https://github.com/michaelfeil/infinity) serving `google/siglip-so400m-patch14-384`
-(1152-d):
-
-```
-michaelf34/infinity:0.0.77-cpu   v2 --model-id google/siglip-so400m-patch14-384 --port 7997 --engine torch --device cpu  --no-trust-remote-code
-michaelf34/infinity:0.0.77       …same, --device cuda   (GPU; needs nvidia CDI or the container toolkit)
-```
-
-- First start downloads ~3.3 GB into `HF_HOME` — put it on a volume, and set `HF_HUB_DISABLE_XET=1`
-  (the Xet transfer stalls mid-blob; the plain CDN path finishes).
-- **Bind it to loopback or the private network only.** The API has no auth and fetches URLs
-  server-side — on a LAN it is an SSRF pivot.
-- Name the host in `LOOKUP_EMBED_ALLOWED_HOSTS`; the SSRF guard blocks private addresses otherwise.
-- **The URL ends in `/embeddings_image`.** `/embeddings` is the text route: it answers 200 with the
-  right model and width, having embedded the `data:image/jpeg;base64,…` *string* — every photo
-  shares that prefix, so the whole catalog collapses onto one vector and recall becomes noise
-  without an error. `lookup_doctor`'s `discrimination` check exists to catch exactly this.
-- Remote GPU box (`https://ai.internal/…`): add `api_key`, keep `timeout_s` ~10, and confirm both the
-  web tier **and** the worker reach it — `lookup_doctor` probes both.
+This table is the whole install-time decision. Everything below it — running the reference backend
+(Infinity, CPU/GPU), the wire contract any alternative endpoint must satisfy, bringing your own
+provider class, and changing the model later — is **`docs/embedding.md`**.
 
 The settings block operators copy is **`docs/settings_example.py`** — it is a real file, imported
-and asserted on by `tests/test_docs_example.py`, so it cannot drift from the rules above.
+and asserted on by `tests/test_docs_example.py`, so it cannot drift.
 
 ## Bootstrap order
 

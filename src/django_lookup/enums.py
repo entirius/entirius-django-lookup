@@ -35,7 +35,8 @@ class DecisionSource(models.TextChoices):
 class MatchKind(StrEnum):
     """How a `/search/` hit relates to the query — API vocabulary, never a column.
 
-    `exact`: the same identifier (trusted GTIN, brand+MPN) or the same picture file (pHash near-exact).
+    `exact`: the same identifier (trusted GTIN, brand+MPN) or the same picture file (pHash near-exact
+    the embedding does not contradict — `scoring.SAME_FILE_COSINE`).
     `similar`: something agreed, short of that. `none`: a blocking neighbour nothing agreed on.
     """
 

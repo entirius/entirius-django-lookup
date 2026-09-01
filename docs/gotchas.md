@@ -50,6 +50,11 @@ Install-time traps (extensions, `lookup` queue, OAS 3.1, frozen `dim`, `/embeddi
 - **`similarity` is relevance to the *query*, not the dedup score.** A photo-only query reports 100 for
   the same picture file while `/check/` on that photo still refuses `match` — two questions, two scales
   (`concept.md` § Relevance). Conflicts never lower it; `decision` carries them.
+- **Flat packshots collide on pHash** (grayscale DCT — colour-only variants hash identically), so the
+  relevance same-file shortcut is vetoed by the embedding: pHash ≤ `PHASH_NEAR_EXACT` with a cosine
+  below `SAME_FILE_COSINE` (0.95) drops to the reworked-shot band — the same file re-saved or resized
+  embeds at ~0.98–1.0, so a weaker cosine marks a collision, not a copy. The dedup score is unaffected
+  (`image_near_exact` stays evidence, never proof).
 - **Display data is an N+1 unless the provider defines `basics(refs)` / `detail_urls(refs)`.** Measured:
   20 hits × singular `basic()` + `detail_url()` = 246 queries against the seeded PIM provider (zeno,
   2026-08-24). `lookup_service._display` uses the batch pair when both exist. **TODO (other repos):** add
