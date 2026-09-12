@@ -37,6 +37,14 @@ Install-time traps (extensions, `lookup` queue, OAS 3.1, frozen `dim`, `/embeddi
 - **Dictionary keys are stored folded** (lowercase, ASCII, no punctuation): lookups happen after `fold()`,
   an accented key is unreachable. `test_dictionaries` enforces it.
 - **Stopwords include `a`, `z`, `i`, `w`** — single-letter pl/en tokens vanish from `name_norm` by design.
+- **`name_similarity` is the better of two measurements** — the query name as given, and with the
+  candidate's own `brand_norm` removed from it as a whole word (`blocking._without_candidate_brand`).
+  That is how a brand typed into the name compares equal to the index, which stripped it. Do not
+  "fix" this by stripping dictionary brands from any position of a query: a compatibility word
+  ("case for Apple ...") would become the query's brand and raise `brand_conflict` against the
+  accessory's real brand.
+- **The word-similarity leg is the last leg** (`blocking._words`): the pool is cut at
+  `CANDIDATE_LIMIT`, and a text+image query must not lose its HNSW neighbours to 50 word hits.
 - **`Fingerprint.deep` mirrors `django_pim.RealProduct.deep`** on purpose — not `depth`.
 
 ## API

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.0
+
+- **A brand typed into the query name no longer lowers its own score.** The indexer removes the
+  brand its provider supplies from `name_norm` wherever it sits; the query side strips a brand only
+  when the caller passes a `brand` field or a dictionary brand leads the name. Naming a product the
+  natural way — brand inside the name, no `brand` field — therefore compared `drill brandx 18v`
+  against `drill 18v` (trigram 0.72, below the review line) while the same name without the brand
+  word scored 1.00. `name_similarity` is now the better of two measurements: the query name as given,
+  and with the candidate's own `brand_norm` removed from it as a whole word — per candidate, exactly
+  what the index removed from that row. No normaliser change, no new brand vocabulary, no index
+  rebuild; `brand_norm` and the brand level are untouched, so a compatibility word ("case for
+  Apple ...") cannot turn into a false `brand_conflict`.
+- **Word-similarity blocking leg.** `similarity` is over the whole string, so a query of "make +
+  model" typed against a long marketing title never reached `TRIGRAM_FLOOR` and returned zero
+  candidates — silence, which reads as "not in the catalog". A fifth leg, pg_trgm
+  `word_similarity(query, name_norm)` ≥ 0.6 (`<%`, served by the existing GIN index — no migration),
+  returns the top 50 stored names in which the query matches a run of consecutive words; a typo still
+  passes, a single-word query never triggers it. It runs after the image legs, so a text+image query
+  cannot lose its HNSW neighbours to it at the `CANDIDATE_LIMIT` cut. Scoring is untouched: such a hit
+  carries `name_tokens_strong` and shows in `/search/` at full text relevance and in `/check/` as a
+  visible candidate with its reasons.
+- Docs: `concept.md` (five blocking legs, the two-sided similarity), `gotchas.md`, `testing.md`.
+
 ## 0.2.1
 
 - The embedding can veto the pHash same-file shortcut in `/search/` relevance: pHash <=
