@@ -200,3 +200,17 @@ def test_display_falls_back_to_singular_calls_when_the_batch_form_raises(pim_pro
     monkeypatch.setattr(pim_provider, "basics", broken_basics)
     hits = search(LookupQuery(q=GTIN)).hits
     assert hits[0].basic["name"] == "Wiertarka udarowa Bosch"
+
+
+def test_a_brand_written_into_the_query_name_scores_like_the_index_stored_it(pim_provider):
+    """`brandx` is not in the dictionary; the index dropped it from the stored name because the
+    product's brand field said so. Naming the product the natural way, brand inside the name and no
+    `brand` field, must compare equal names."""
+    add_product(pim_provider, "SKU-1", "Bag hook for Brandx M365 Pro", brand="Brandx")
+    result = check(LookupQuery(name="Bag hook for Brandx M365 Pro"))
+    assert result.parsed.name_norm == "bag hook brandx m365 pro"
+    candidate = result.candidates[0]
+    assert candidate.ref == "SKU-1"
+    trigram = next(reason for reason in candidate.reasons if reason.code == "name_trigram")
+    assert trigram.score == 25
+    assert candidate.decision == DecisionAuto.REVIEW

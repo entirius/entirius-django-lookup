@@ -43,6 +43,24 @@ legs, each cheap in SQL:
 | pHash neighbourhood | `bit_count(phash # query) <= 10` (seq scan over 8-byte columns) | top 20 |
 | Name trigram | `pg_trgm` GIN index, similarity ≥ `TRIGRAM_FLOOR` (0.35) | top 50 |
 | Image embedding | pgvector HNSW, cosine distance, same `vec_model` only | top 20 |
+| Name words | pg_trgm `word_similarity(query, name_norm)` ≥ `WORD_SIMILARITY_FLOOR` (0.6), same GIN index; needs ≥ 2 query tokens | top 50 |
+
+The word leg exists because `similarity` is over the whole string: "make + model" typed against a
+90-character marketing title never reaches the floor, however well the words match. `word_similarity`
+scores the query against any run of consecutive words of the stored name, so the rest of the title does
+not count against it, and a typo still passes. It runs last on purpose: the pool is cut at
+`CANDIDATE_LIMIT`, and a text+image query must not lose its image neighbours to it. Such a hit scores on
+`name_tokens_strong` (`token_set_ratio` ignores the extra tokens) and rarely on `name_trigram`, so it
+lands in `/search/` at full text relevance and in `/check/` as a visible candidate below the review
+line — the point is that it is *seen*.
+
+`name_similarity` is measured twice per candidate — against the query name as given and with the
+candidate's own `brand_norm` removed from it as a whole word — and the better value is kept. The
+indexer removes the provider's brand from `name_norm`; a query rarely carries a `brand` field, so its
+name keeps the word and the two strings would reach pg_trgm one token apart: writing the brand into a
+product name, the ordinary thing to do, would lower its own score. Removing per candidate exactly what
+the index removed from that candidate is the symmetric comparison. It changes no `brand_norm` and
+raises no `brand_conflict`: a compatibility word ("case for Apple ...") stays a word, not a brand.
 
 Every row blocking returns carries the annotations scoring needs: `name_similarity` (the pg_trgm
 value) and, when the query has a vector, `image_distance` (cosine distance) — computed once, on the
@@ -198,5 +216,6 @@ same product" answer must not.
 - **Brand**: fold, drop legal forms, alias table (`hewlett packard` → `hp`).
 - **Name**: fold + unaccent, units (`1,5 l` → `1.5l`), stopwords pl/en/de, brand strip (given, or leading
   tokens in the dictionary), pack (`2x`, `3-pack`, `zestaw 2`, `4 szt`), colour dictionary → english,
-  size (`xl`, `eu 42`).
+  size (`xl`, `eu 42`). A brand the query did not strip is taken out per candidate at blocking time
+  (§ Blocking), not here — the normaliser never guesses which word the index dropped.
 
