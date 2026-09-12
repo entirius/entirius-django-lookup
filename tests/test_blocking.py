@@ -15,6 +15,7 @@ from django_lookup.models import Fingerprint
 from django_lookup.schemas.requests.lookup import LookupQuery
 from django_lookup.services.blocking import TRIGRAM_LIMIT, candidates
 from django_lookup.services.query_parser import parse
+from django_lookup.services.scoring import TRIGRAM_FLOOR
 
 pytestmark = pytest.mark.django_db
 
@@ -106,3 +107,59 @@ def test_scope_keeps_the_other_catalog_out(catalog):
 def test_pool_is_capped(catalog):
     parsed = parse(LookupQuery(q="seria"))
     assert len(candidates(parsed, SCOPE, limit=5)) <= 5
+
+
+_LONG_NAME = "kickscooter c2 pro kids 10.6mi range adjustable handlebar height refurbished"
+
+
+def _long_titled_row(ref: str = "SKU-LONG", brand_norm: str = "") -> Fingerprint:
+    return Fingerprint.objects.create(
+        kind=FingerprintKind.PIM_PRODUCT, ref=ref, name_norm=_LONG_NAME, brand_norm=brand_norm
+    )
+
+
+def test_a_short_query_inside_a_long_title_is_found_by_word_similarity(catalog):
+    """What an operator types: make and model, no marketing tail. Whole-string similarity cannot
+    see it (the title is three times longer than the query); word similarity can."""
+    _long_titled_row()
+    parsed = parse(LookupQuery(q="kickscooter c2"))
+    rows = {row.ref: row for row in candidates(parsed, SCOPE)}
+    assert "SKU-LONG" in rows
+    assert rows["SKU-LONG"].name_similarity < TRIGRAM_FLOOR
+
+
+def test_a_typo_in_the_short_query_still_finds_the_long_title(catalog):
+    _long_titled_row()
+    parsed = parse(LookupQuery(q="kickscoter c2 pro"))
+    assert "SKU-LONG" in {row.ref for row in candidates(parsed, SCOPE)}
+
+
+def test_one_word_never_blocks_by_word_similarity(catalog):
+    _long_titled_row()
+    parsed = parse(LookupQuery(q="kickscooter"))
+    assert "SKU-LONG" not in {row.ref for row in candidates(parsed, SCOPE)}
+
+
+def test_the_candidate_brand_inside_the_query_name_does_not_lower_its_similarity(catalog):
+    """The index dropped `brandx` from the stored name (its provider knew the brand). A query that
+    names the product the natural way, brand inside the name and no `brand` field, must measure the
+    same similarity as one typed without the brand word."""
+    Fingerprint.objects.create(
+        kind=FingerprintKind.PIM_PRODUCT, ref="SKU-BRANDED", name_norm="bag hook m365 pro", brand_norm="brandx"
+    )
+    with_brand = parse(LookupQuery(name="Bag hook for Brandx M365 Pro"))
+    without_brand = parse(LookupQuery(name="Bag hook for M365 Pro"))
+    assert with_brand.brand_norm == ""  # brandx is not a dictionary brand: nothing was stripped
+    rows = {row.ref: row for row in candidates(with_brand, SCOPE)}
+    assert rows["SKU-BRANDED"].name_similarity == pytest.approx(1.0)
+    plain = {row.ref: row for row in candidates(without_brand, SCOPE)}
+    assert plain["SKU-BRANDED"].name_similarity == pytest.approx(1.0)
+
+
+def test_a_brand_word_inside_another_word_is_not_removed(catalog):
+    Fingerprint.objects.create(
+        kind=FingerprintKind.PIM_PRODUCT, ref="SKU-PRO", name_norm="product cover m365", brand_norm="pro"
+    )
+    parsed = parse(LookupQuery(name="product cover m365"))
+    rows = {row.ref: row for row in candidates(parsed, SCOPE)}
+    assert rows["SKU-PRO"].name_similarity == pytest.approx(1.0)

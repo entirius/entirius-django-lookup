@@ -52,7 +52,7 @@ src/django_lookup/
 ```
 
 Flow: provider `iter_items()` → `build_fingerprint` → `Fingerprint` → `blocking.candidates`
-(exact keys ∪ pHash ∪ trigram ∪ HNSW, ≤ 100) → `scoring.score_pair` (L0–L8, every level a `Reason`)
+(exact keys ∪ pHash ∪ trigram ∪ HNSW ∪ word similarity, ≤ 100) → `scoring.score_pair` (L0–L8, every level a `Reason`)
 → `scoring.decide` → `/search/` (hits) or `/check/` (+ score, decision, one `DedupDecision` per candidate).
 
 ## Where things live

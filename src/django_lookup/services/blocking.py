@@ -4,24 +4,33 @@
 
 """Blocking — cheap candidate generation in SQL (research r02 §1, r01 §3).
 
-UNION of four legs, exact hits first: the exact keys (GTIN14, brand+MPN, catalog reference — B-tree),
+UNION of five legs, exact hits first: the exact keys (GTIN14, brand+MPN, catalog reference — B-tree),
 the pHash neighbourhood (`bit_count(phash # query) <= LOOKUP_PHASH_MAX_DISTANCE`, a seq scan over
-8-byte columns), the trigram top-50 (GIN `gin_trgm_ops`) and the image-embedding top-k (pgvector HNSW
-cosine, `LOOKUP_IMAGE_TOP_K`). Recall is judged by `tests/test_blocking.py`; scoring never sees a row
-this function did not return.
+8-byte columns), the trigram top-50 (GIN `gin_trgm_ops`), the image-embedding top-k (pgvector HNSW
+cosine, `LOOKUP_IMAGE_TOP_K`) and the word-similarity top-50 (pg_trgm `word_similarity`, the same GIN
+index: the query against any run of consecutive words of the stored name — what the whole-string
+similarity cannot see when a short query meets a long marketing title). Recall is judged by
+`tests/test_blocking.py`; scoring never sees a row this function did not return.
 
 Every returned row carries `name_similarity` (the pg_trgm value) and, when the query has a vector,
 `image_distance` (the cosine distance) — the annotations levels L3 and L8 score on. Query and
 annotation must stay the same text and the same vector, so both live here.
+
+`name_similarity` is measured against the query name as given *and* with the candidate's own
+`brand_norm` taken out of it, and the better one counts. The indexer removes the provider's brand from
+`name_norm`; a query rarely carries a `brand` field, so its name keeps the word and the two strings
+would reach pg_trgm one token apart — writing the brand into a product name, the ordinary thing to do,
+would lower its own score. Removing per candidate exactly what the index removed from that candidate is
+the symmetric comparison; no vocabulary has to guess which word the index dropped.
 """
 
 from functools import reduce
 from operator import or_
 
-from django.contrib.postgres.search import TrigramSimilarity
+from django.contrib.postgres.search import TrigramSimilarity, TrigramWordSimilarity
 from django.db import connection, transaction
 from django.db.models import BigIntegerField, F, FloatField, Func, IntegerField, Q, QuerySet, Value
-from django.db.models.functions import Cast
+from django.db.models.functions import Cast, Concat, Greatest, Replace
 from pgvector import HalfVector
 from pgvector.django import CosineDistance
 
@@ -32,9 +41,14 @@ from django_lookup.services.scoring import TRIGRAM_FLOOR
 from django_lookup.settings import get_hnsw_ef_search, get_image_top_k, get_phash_max_distance
 
 TRIGRAM_LIMIT = 50  # top-N of the fuzzy leg (research r02 §1)
+WORD_LIMIT = 50  # top-N of the word-similarity leg
 CANDIDATE_LIMIT = 100  # hard cap on what scoring is asked to look at
 # Shortest text worth a trigram search: below 3 characters there is not one full trigram.
 MIN_TRIGRAM_LENGTH = 3
+# Word-similarity floor: pg_trgm's own default for `<%`, so the GIN pre-filter and this floor agree.
+WORD_SIMILARITY_FLOOR = 0.6
+# Fewest query tokens worth a word search: one generic word ("range") sits inside half the titles at 1.0.
+MIN_WORD_TOKENS = 2
 
 
 def candidates(
@@ -47,6 +61,7 @@ def candidates(
         + _near_hash(base, image)
         + _trigram(base, parsed.name_norm)
         + _near_vector(base, image)
+        + _words(base, parsed)
     )
     pool: dict[int, Fingerprint] = {}
     for row in legs:
@@ -54,9 +69,22 @@ def candidates(
     return list(pool.values())[:limit]
 
 
+def _without_candidate_brand(text: str):
+    """`text` with the row's own `brand_norm` removed as a whole word — what the indexer did to that
+    row's name. Padding with spaces keeps `pro` out of `product`; an empty brand matches nothing."""
+    brand = Concat(Value(" "), F("brand_norm"), Value(" "))
+    return Replace(Value(f" {text} "), brand, Value(" "))
+
+
 def _annotated(scope: list[str], text: str, image: QueryImage | None) -> QuerySet:
     """One base queryset for every leg, so all candidates carry the same similarity and distance."""
-    similarity = TrigramSimilarity("name_norm", text) if text else Value(0.0, output_field=FloatField())
+    if text:
+        similarity = Greatest(
+            TrigramSimilarity("name_norm", text),
+            TrigramSimilarity("name_norm", _without_candidate_brand(text)),
+        )
+    else:
+        similarity = Value(0.0, output_field=FloatField())
     queryset = Fingerprint.objects.filter(kind__in=list(scope)).annotate(name_similarity=similarity)
     if image is None or image.vector is None:
         return queryset
@@ -100,6 +128,24 @@ def _trigram(base: QuerySet, text: str) -> list[Fingerprint]:
         return []
     queryset = base.filter(name_norm__trigram_similar=text, name_similarity__gte=TRIGRAM_FLOOR)
     return list(queryset.order_by("-name_similarity", "id")[:TRIGRAM_LIMIT])
+
+
+def _words(base: QuerySet, parsed: ParsedQuery) -> list[Fingerprint]:
+    """pg_trgm `word_similarity(query, name_norm)`: the query against any run of consecutive words of
+    the stored name (`<%` uses the same GIN index as the trigram leg).
+
+    `similarity` is over the whole string, so "make + model" typed against a 90-character
+    marketing title never reaches `TRIGRAM_FLOOR`; word similarity does not care how long the rest of
+    the title is and still tolerates a typo. It is the last leg on purpose: the pool is cut at
+    `CANDIDATE_LIMIT`, and a text+image query must not lose its image neighbours to it.
+    """
+    if len(parsed.name_tokens) < MIN_WORD_TOKENS:
+        return []
+    queryset = base.filter(name_norm__trigram_word_similar=parsed.name_norm).annotate(
+        word_similarity=TrigramWordSimilarity(parsed.name_norm, "name_norm")
+    )
+    queryset = queryset.filter(word_similarity__gte=WORD_SIMILARITY_FLOOR)
+    return list(queryset.order_by("-word_similarity", "id")[:WORD_LIMIT])
 
 
 def _near_hash(base: QuerySet, image: QueryImage | None) -> list[Fingerprint]:
