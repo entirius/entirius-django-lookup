@@ -27,6 +27,8 @@ across PIM and atlas, by identifier, text or image. App label `django_lookup`, t
 - Git flow: `develop` + `master`, PRs. Do not commit by default — the operator decides.
 - **A number enters this file or the harness AGENTS.md only after being measured on a fresh seed** —
   never derived, never carried forward (`docs/operations.md` § Re-measuring).
+- Access: areas live on the AppConfig (`access_areas`, `access_route_rules`), every admin view carries
+  `access_area`; a new admin route without one fails `tests/test_access_ownership.py`.
 
 ## Map
 
