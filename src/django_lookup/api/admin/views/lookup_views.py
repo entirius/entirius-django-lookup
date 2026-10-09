@@ -75,6 +75,8 @@ class _LookupView(APIView):
 
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAdminUser]
+    access_area = "lookup.search"
+    access_levels = {"POST": "read"}  # search and check only read the catalogs
     parser_classes = [JSONParser, MultiPartParser]
 
     def get_throttles(self) -> list:
