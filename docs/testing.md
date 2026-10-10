@@ -14,3 +14,18 @@ description: Which test file covers what.
   `test_image_api` (multipart, validation, degrade, throttle) and `test_lookup_doctor`. Calibration:
 `test_eval_service.py` (CSV parsing, threshold sweep, confusion, both recall diagnostics) and
 `test_lookup_eval_command.py` (the command never raises, `--image-only` output shape).
+
+## Database and fixtures
+
+- Postgres only (`tests/settings.py`): `DATABASE_URL` wins, else
+  `LOOKUP_TEST_DB_HOST/PORT/NAME/USER/PASSWORD` (the defaults point at the database of the entirius-zeno harness
+  on its host port). The role needs CREATE DATABASE + CREATE EXTENSION. Migrations run in tests.
+- Images are generated (`tests/images.py`), never committed. `tests/fake_embedding.py` backs
+  `LOOKUP_EMBEDDING["provider"]`; `tests/vectors.py` builds vectors at an exact cosine;
+  `tests/fake_provider.py` is the catalog.
+- `tests/test_docs_example.py` asserts on `docs/settings_example.py` — the documented config is under test.
+
+## In the entirius-zeno harness
+
+In the entirius-zeno harness: `make module-test MODULE=entirius-django-lookup` runs the same suite inside the
+service container, where `DATABASE_URL` is already set.

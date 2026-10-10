@@ -1,22 +1,18 @@
 # AGENTS.md
 
-entirius-django-lookup — product lookup & dedup for Volkanos: "does something like this already exist?"
+entirius-django-lookup — product lookup & dedup module of Entirius: "does something like this already exist?"
 across PIM and atlas, by identifier, text or image. App label `django_lookup`, table prefix `django_lookup_`.
 
-## Quick Reference
-
-- Python ≥ 3.12, Django ≥ 5, PostgreSQL + pgvector / pg_trgm / unaccent, `uv`, ruff, hatchling, MPL-2.0.
-- Read first: `docs/install.md` (host) · `docs/api.md` (caller) · `docs/concept.md` (why) ·
-  `docs/gotchas.md` (before editing). This file is the map; it explains nothing twice.
+Read first: `docs/install.md` (host) · `docs/api.md` (caller) · `docs/concept.md` (why) ·
+`docs/gotchas.md` (before editing). This file is the map; it explains nothing twice.
 
 ## Commands
 
 | Command | Meaning |
 |---|---|
 | `make install` | `uv sync --all-extras` |
-| `make test` | pytest — Postgres only, see Testing |
+| `make test` | pytest — Postgres only, see `docs/testing.md` |
 | `make check` / `fix` | ruff lint + format (+ canonical `.gitleaks.toml` guard) |
-| in zeno: `make module-test MODULE=entirius-django-lookup` | the same suite inside the service container |
 
 ## Conventions
 
@@ -30,7 +26,7 @@ across PIM and atlas, by identifier, text or image. App label `django_lookup`, t
 - Access: areas live on the AppConfig (`access_areas`, `access_route_rules`), every admin view carries
   `access_area`; a new admin route without one fails `tests/test_access_ownership.py`.
 
-## Map
+## Architecture
 
 ```
 src/django_lookup/
@@ -57,9 +53,7 @@ Flow: provider `iter_items()` → `build_fingerprint` → `Fingerprint` → `blo
 (exact keys ∪ pHash ∪ trigram ∪ HNSW ∪ word similarity, ≤ 100) → `scoring.score_pair` (L0–L8, every level a `Reason`)
 → `scoring.decide` → `/search/` (hits) or `/check/` (+ score, decision, one `DedupDecision` per candidate).
 
-## Where things live
-
-| Question | Answer |
+| Topic | Where |
 |---|---|
 | A setting's name, default, meaning | `settings.py` accessors; the table in `docs/install.md` |
 | A batch size, cap, tolerance, weight | `constants.py`, `scoring.py`; quoted once in `docs/concept.md` |
@@ -72,18 +66,9 @@ Flow: provider `iter_items()` → `build_fingerprint` → `Fingerprint` → `blo
 | Calibration numbers and how the legs are isolated | `manage.py lookup_eval`; `services/eval_service.py` docstring |
 | Running, replacing or extending the embedding backend | `docs/embedding.md`; `embedding/base.py` is the contract |
 | Freshness, tasks, degradation, tuning | `docs/operations.md` |
-| Which test file covers what | `docs/testing.md` |
+| Which test file covers what; test database, fixtures, the harness run | `docs/testing.md` |
+| Before touching blocking, scoring, the image layer or the API | `docs/gotchas.md` |
 | What changed and why | `CHANGELOG.md` |
-
-## Testing
-
-- Postgres only (`tests/settings.py`): `DATABASE_URL` wins (zeno container), else
-  `LOOKUP_TEST_DB_HOST/PORT/NAME/USER/PASSWORD` (defaults = zeno host port 5532, `entirius`/`entirius-dev`).
-  The role needs CREATE DATABASE + CREATE EXTENSION. Migrations run in tests.
-- Images are generated (`tests/images.py`), never committed. `tests/fake_embedding.py` backs
-  `LOOKUP_EMBEDDING["provider"]`; `tests/vectors.py` builds vectors at an exact cosine;
-  `tests/fake_provider.py` is the catalog.
-- `tests/test_docs_example.py` asserts on `docs/settings_example.py` — the documented config is under test.
 
 ## Gotchas
 
