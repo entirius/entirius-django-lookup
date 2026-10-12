@@ -10,6 +10,7 @@ the pgvector image).
 """
 
 import os
+from importlib.util import find_spec
 
 import dj_database_url
 
@@ -27,6 +28,9 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "django_lookup",
 ]
+# django_access when importable (zeno): tests/test_access_ownership.py proves the access declarations.
+if find_spec("django_access"):
+    INSTALLED_APPS.append("django_access")
 
 MIDDLEWARE = [
     "django.contrib.sessions.middleware.SessionMiddleware",
