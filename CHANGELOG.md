@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 — 2026-11-18
 
 - Require `Pillow>=13.0.0` (fixes known Pillow CVEs; Pillow 13 requires Python 3.11+).
 
